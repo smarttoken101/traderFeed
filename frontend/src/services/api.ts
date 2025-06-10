@@ -10,15 +10,16 @@ interface ApiResponse<T> {
 interface Article {
   id: string;
   title: string;
-  content: string;
-  url: string;
-  source: string;
+  description?: string;
+  content?: string;
+  link: string;
   publishedAt: string;
   markets: string[];
-  instruments: string[];
-  sentimentScore: number;
-  sentimentLabel: 'positive' | 'negative' | 'neutral';
+  instruments?: string[];
+  sentimentScore?: number;
+  sentimentLabel?: 'positive' | 'negative' | 'neutral';
   createdAt: string;
+  feedId: string;
   feed?: {
     name: string;
     category: string;
@@ -35,7 +36,7 @@ interface AssetNews {
 interface AssetStatistics {
   timeframe: string;
   totalArticles: number;
-  sentimentBreakdown: {
+  sentimentBreakdown?: {
     positive: number;
     negative: number;
     neutral: number;
@@ -43,7 +44,15 @@ interface AssetStatistics {
   topAssets: {
     asset: string;
     mentions: number;
-    sentiment: number;
+    sentiment: {
+      positive: number;
+      negative: number;
+      neutral: number;
+    };
+  }[];
+  topCategories?: {
+    category: string;
+    mentions: number;
   }[];
   lastUpdated: string;
 }
@@ -52,7 +61,11 @@ interface TrendingAsset {
   rank: number;
   asset: string;
   mentions: number;
-  sentiment: number;
+  sentiment: {
+    positive: number;
+    negative: number;
+    neutral: number;
+  };
   change: number;
 }
 
@@ -164,9 +177,13 @@ class ApiService {
     return this.request<{
       articles: Article[];
       pagination: {
-        page: number;
-        limit: number;
-        total: number;
+        currentPage: number;
+        pageSize: number;
+        totalItems: number;
+        totalPages: number;
+        hasNextPage: boolean;
+        hasPreviousPage: boolean;
+        totalCount: number;
       };
     }>(`/articles${queryString ? `?${queryString}` : ''}`);
   }
@@ -189,9 +206,11 @@ class ApiService {
   async getMonitorStatus() {
     return this.request<{
       isRunning: boolean;
-      lastProcessed: string;
-      articlesProcessed: number;
-      feedsActive: number;
+      activeJobs: number;
+      nextRuns: any[];
+      lastProcessed?: string;
+      articlesProcessed?: number;
+      feedsActive?: number;
     }>('/assets/monitor/status');
   }
 

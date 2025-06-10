@@ -34,16 +34,16 @@ class QueryOptimizer {
       id: true,
       title: true,
       description: true,
-      url: true,
+      link: true,
       publishedAt: true,
-      sentiment: true,
       sentimentScore: true,
-      market: true,
+      sentimentLabel: true,
+      markets: true,
       feedId: true,
       createdAt: true,
-      // Exclude heavy fields like content and processedContent by default
+      // Exclude heavy fields like content and originalText by default
       ...(include?.content && { content: true }),
-      ...(include?.processedContent && { processedContent: true }),
+      ...(include?.originalText && { originalText: true }),
     };
 
     // Optimize orderBy for database performance
@@ -270,13 +270,13 @@ class QueryOptimizer {
           totalItems = await prisma.article.count({ where });
           break;
         case 'cot':
-          totalItems = await prisma.cOTData.count({ where });
+          totalItems = await prisma.cotData.count({ where });
           break;
         case 'knowledge':
           totalItems = await prisma.document.count({ where });
           break;
         case 'feeds':
-          totalItems = await prisma.feed.count({ where });
+          totalItems = await prisma.rssFeed.count({ where });
           break;
         default:
           throw new Error(`Unknown entity: ${entity}`);

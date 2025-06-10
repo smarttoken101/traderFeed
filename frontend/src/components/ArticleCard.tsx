@@ -1,5 +1,5 @@
 import React from 'react';
-import { ExternalLink, Clock, Tag, TrendingUp } from 'lucide-react';
+import { ExternalLink, Clock, TrendingUp } from 'lucide-react';
 import type { Article } from '../services/api';
 import { 
   formatRelativeTime, 
@@ -21,8 +21,8 @@ const ArticleCard: React.FC<ArticleCardProps> = ({
   showFullContent = false,
   onAssetClick 
 }) => {
-  const sentimentColor = getSentimentColor(article.sentimentLabel);
-  const sentimentIcon = getSentimentIcon(article.sentimentLabel);
+  const sentimentColor = getSentimentColor(article.sentimentLabel || 'neutral');
+  const sentimentIcon = getSentimentIcon(article.sentimentLabel || 'neutral');
 
   const handleAssetClick = (asset: string, e: React.MouseEvent) => {
     e.preventDefault();
@@ -31,7 +31,7 @@ const ArticleCard: React.FC<ArticleCardProps> = ({
   };
 
   const openArticle = () => {
-    window.open(article.url, '_blank', 'noopener,noreferrer');
+    window.open(article.link, '_blank', 'noopener,noreferrer');
   };
 
   return (
@@ -58,10 +58,12 @@ const ArticleCard: React.FC<ArticleCardProps> = ({
           sentimentColor
         )}>
           <span className="mr-1">{sentimentIcon}</span>
-          {article.sentimentLabel}
-          <span className="ml-1 text-xs">
-            ({(article.sentimentScore * 100).toFixed(0)}%)
-          </span>
+          {article.sentimentLabel || 'neutral'}
+          {article.sentimentScore && (
+            <span className="ml-1 text-xs">
+              ({(article.sentimentScore * 100).toFixed(0)}%)
+            </span>
+          )}
         </div>
       </div>
 
@@ -71,54 +73,34 @@ const ArticleCard: React.FC<ArticleCardProps> = ({
       </h3>
 
       {/* Content Preview */}
-      {article.content && (
+      {article.description && (
         <p className="text-gray-600 mb-4 line-clamp-3">
-          {showFullContent ? article.content : truncateText(article.content, 200)}
+          {showFullContent ? article.description : truncateText(article.description, 200)}
         </p>
       )}
 
-      {/* Assets/Instruments Tags */}
-      {article.instruments && article.instruments.length > 0 && (
-        <div className="mb-4">
-          <div className="flex items-center space-x-1 mb-2">
-            <TrendingUp className="h-4 w-4 text-gray-400" />
-            <span className="text-sm font-medium text-gray-700">Assets:</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {article.instruments.slice(0, 6).map((instrument) => (
-              <button
-                key={instrument}
-                onClick={(e) => handleAssetClick(instrument, e)}
-                className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-primary-100 text-primary-800 hover:bg-primary-200 transition-colors"
-              >
-                {instrument}
-              </button>
-            ))}
-            {article.instruments.length > 6 && (
-              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
-                +{article.instruments.length - 6} more
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Markets Tags */}
+      {/* Assets/Markets Tags */}
       {article.markets && article.markets.length > 0 && (
         <div className="mb-4">
           <div className="flex items-center space-x-1 mb-2">
-            <Tag className="h-4 w-4 text-gray-400" />
+            <TrendingUp className="h-4 w-4 text-gray-400" />
             <span className="text-sm font-medium text-gray-700">Markets:</span>
           </div>
           <div className="flex flex-wrap gap-2">
-            {article.markets.map((market) => (
-              <span
+            {article.markets.slice(0, 6).map((market) => (
+              <button
                 key={market}
-                className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700"
+                onClick={(e) => handleAssetClick(market, e)}
+                className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-primary-100 text-primary-800 hover:bg-primary-200 transition-colors"
               >
-                {getCategoryIcon(market)} {market}
-              </span>
+                {market}
+              </button>
             ))}
+            {article.markets.length > 6 && (
+              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+                +{article.markets.length - 6} more
+              </span>
+            )}
           </div>
         </div>
       )}
@@ -126,7 +108,7 @@ const ArticleCard: React.FC<ArticleCardProps> = ({
       {/* Footer */}
       <div className="flex items-center justify-between pt-3 border-t border-gray-200">
         <div className="text-sm text-gray-500">
-          Source: <span className="font-medium">{article.source}</span>
+          Source: <span className="font-medium">{article.feed?.name || 'Unknown'}</span>
         </div>
         
         <button

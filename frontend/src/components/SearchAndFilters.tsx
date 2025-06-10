@@ -40,13 +40,13 @@ const SearchAndFilters: React.FC<SearchAndFiltersProps> = ({
         {/* Search */}
         <div className="flex-1 min-w-[250px]">
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+            <Search className="input-icon" />
             <input
               type="text"
               placeholder="Search news articles..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="input-field pl-10"
+              className="input-field input-field-with-icon text-gray-900 placeholder-gray-500"
             />
           </div>
         </div>
@@ -54,11 +54,11 @@ const SearchAndFilters: React.FC<SearchAndFiltersProps> = ({
         {/* Asset Filter */}
         <div className="min-w-[180px]">
           <div className="relative">
-            <TrendingUp className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+            <TrendingUp className="input-icon" />
             <select
               value={selectedAsset}
               onChange={(e) => setSelectedAsset(e.target.value)}
-              className="input-field pl-10 appearance-none bg-white cursor-pointer"
+              className="input-field input-field-with-icon appearance-none bg-white cursor-pointer text-gray-900"
             >
               <option value="">All Assets</option>
               {assets.map((asset) => (
@@ -73,11 +73,11 @@ const SearchAndFilters: React.FC<SearchAndFiltersProps> = ({
         {/* Sentiment Filter */}
         <div className="min-w-[140px]">
           <div className="relative">
-            <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+            <Filter className="input-icon" />
             <select
               value={selectedSentiment}
               onChange={(e) => setSelectedSentiment(e.target.value)}
-              className="input-field pl-10 appearance-none bg-white cursor-pointer"
+              className="input-field input-field-with-icon appearance-none bg-white cursor-pointer text-gray-900"
             >
               {sentiments.map((sentiment) => (
                 <option key={sentiment} value={sentiment}>
@@ -91,11 +91,11 @@ const SearchAndFilters: React.FC<SearchAndFiltersProps> = ({
         {/* Timeframe Filter */}
         <div className="min-w-[140px]">
           <div className="relative">
-            <Calendar className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+            <Calendar className="input-icon" />
             <select
               value={timeframe}
               onChange={(e) => setTimeframe(e.target.value)}
-              className="input-field pl-10 appearance-none bg-white cursor-pointer"
+              className="input-field input-field-with-icon appearance-none bg-white cursor-pointer text-gray-900"
             >
               {timeframes.map((tf) => (
                 <option key={tf.value} value={tf.value}>

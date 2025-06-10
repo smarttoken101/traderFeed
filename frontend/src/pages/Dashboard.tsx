@@ -57,6 +57,25 @@ const Dashboard: React.FC<DashboardProps> = ({ searchQuery }) => {
     applyFilters();
   }, [articles, filterSearchTerm, selectedAsset, selectedSentiment, timeframe]);
 
+  // Helper function to calculate sentiment breakdown from available data
+  const calculateSentimentBreakdown = (stats: AssetStatistics) => {
+    if (stats.sentimentBreakdown) {
+      return stats.sentimentBreakdown;
+    }
+    
+    // Calculate from top assets if sentimentBreakdown is not available
+    const breakdown = stats.topAssets.reduce(
+      (acc, asset) => ({
+        positive: acc.positive + (asset.sentiment?.positive || 0),
+        negative: acc.negative + (asset.sentiment?.negative || 0),
+        neutral: acc.neutral + (asset.sentiment?.neutral || 0),
+      }),
+      { positive: 0, negative: 0, neutral: 0 }
+    );
+    
+    return breakdown;
+  };
+
   const fetchInitialData = async () => {
     try {
       setLoading(true);
@@ -74,8 +93,8 @@ const Dashboard: React.FC<DashboardProps> = ({ searchQuery }) => {
 
       // Extract unique assets for filter dropdown
       const uniqueAssets = [...new Set(
-        articlesData.articles.flatMap(article => article.instruments)
-      )].sort();
+        articlesData.articles.flatMap(article => article.markets || [])
+      )].filter(Boolean).sort();
       setAvailableAssets(uniqueAssets);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');
@@ -98,9 +117,9 @@ const Dashboard: React.FC<DashboardProps> = ({ searchQuery }) => {
       const data = await ApiService.getArticles({ limit: 100 });
       const filtered = data.articles.filter(article =>
         article.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        article.content?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        article.instruments.some(inst => 
-          inst.toLowerCase().includes(searchQuery.toLowerCase())
+        article.description?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        article.markets?.some(market => 
+          market.toLowerCase().includes(searchQuery.toLowerCase())
         )
       );
       setArticles(filtered);
@@ -116,9 +135,9 @@ const Dashboard: React.FC<DashboardProps> = ({ searchQuery }) => {
     if (filterSearchTerm) {
       filtered = filtered.filter(article =>
         article.title.toLowerCase().includes(filterSearchTerm.toLowerCase()) ||
-        article.content?.toLowerCase().includes(filterSearchTerm.toLowerCase()) ||
-        article.instruments.some(inst => 
-          inst.toLowerCase().includes(filterSearchTerm.toLowerCase())
+        article.description?.toLowerCase().includes(filterSearchTerm.toLowerCase()) ||
+        article.markets?.some(market => 
+          market.toLowerCase().includes(filterSearchTerm.toLowerCase())
         )
       );
     }
@@ -126,7 +145,7 @@ const Dashboard: React.FC<DashboardProps> = ({ searchQuery }) => {
     // Apply asset filter
     if (selectedAsset) {
       filtered = filtered.filter(article =>
-        article.instruments.includes(selectedAsset)
+        article.markets?.includes(selectedAsset)
       );
     }
 
@@ -243,7 +262,7 @@ const Dashboard: React.FC<DashboardProps> = ({ searchQuery }) => {
                 <div>
                   <p className="text-sm font-medium text-gray-600">Positive</p>
                   <p className="text-2xl font-bold text-success-600">
-                    {formatNumber(statistics.sentimentBreakdown.positive)}
+                    {formatNumber(calculateSentimentBreakdown(statistics).positive)}
                   </p>
                 </div>
                 <TrendingUp className="h-8 w-8 text-success-600" />
@@ -255,7 +274,7 @@ const Dashboard: React.FC<DashboardProps> = ({ searchQuery }) => {
                 <div>
                   <p className="text-sm font-medium text-gray-600">Negative</p>
                   <p className="text-2xl font-bold text-danger-600">
-                    {formatNumber(statistics.sentimentBreakdown.negative)}
+                    {formatNumber(calculateSentimentBreakdown(statistics).negative)}
                   </p>
                 </div>
                 <TrendingUp className="h-8 w-8 text-danger-600 transform rotate-180" />

@@ -1,13 +1,13 @@
-import { createClient } from 'redis';
+import * as redis from 'redis';
 import config from '.';
 import logger from '../utils/logger';
 
 class RedisClient {
-  private static instance: ReturnType<typeof createClient>;
+  private static instance: ReturnType<typeof redis.createClient>;
 
-  public static getInstance(): ReturnType<typeof createClient> {
+  public static getInstance(): ReturnType<typeof redis.createClient> {
     if (!RedisClient.instance) {
-      RedisClient.instance = createClient({
+      RedisClient.instance = redis.createClient({
         url: config.redisUrl,
       });
 

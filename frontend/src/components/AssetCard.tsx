@@ -13,13 +13,21 @@ const AssetCard: React.FC<AssetCardProps> = ({ asset, onClick }) => {
   const categoryIcon = getCategoryIcon(category);
   
   const getSentimentIndicator = () => {
-    if (asset.sentiment > 0.1) {
+    // Calculate overall sentiment score from the sentiment object
+    const total = asset.sentiment.positive + asset.sentiment.negative + asset.sentiment.neutral;
+    let sentimentScore = 0;
+    
+    if (total > 0) {
+      sentimentScore = (asset.sentiment.positive - asset.sentiment.negative) / total;
+    }
+    
+    if (sentimentScore > 0.1) {
       return {
         icon: <TrendingUp className="h-4 w-4" />,
         color: 'text-success-600',
         bg: 'bg-success-50'
       };
-    } else if (asset.sentiment < -0.1) {
+    } else if (sentimentScore < -0.1) {
       return {
         icon: <TrendingDown className="h-4 w-4" />,
         color: 'text-danger-600',
@@ -90,7 +98,12 @@ const AssetCard: React.FC<AssetCardProps> = ({ asset, onClick }) => {
         )}>
           {sentimentIndicator.icon}
           <span className="text-sm font-medium">
-            {asset.sentiment > 0 ? '+' : ''}{(asset.sentiment * 100).toFixed(1)}%
+            {(() => {
+              const total = asset.sentiment.positive + asset.sentiment.negative + asset.sentiment.neutral;
+              if (total === 0) return '0.0%';
+              const score = (asset.sentiment.positive - asset.sentiment.negative) / total;
+              return `${score > 0 ? '+' : ''}${(score * 100).toFixed(1)}%`;
+            })()}
           </span>
         </div>
       </div>

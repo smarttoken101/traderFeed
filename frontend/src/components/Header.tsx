@@ -13,16 +13,24 @@ const Header: React.FC<HeaderProps> = ({ onSearch, searchQuery }) => {
   const location = useLocation();
   const [monitorStatus, setMonitorStatus] = useState<{
     isRunning: boolean;
-    lastProcessed: string;
-    articlesProcessed: number;
-    feedsActive: number;
+    activeJobs: number;
+    nextRuns: any[];
+    lastProcessed?: string;
+    articlesProcessed?: number;
+    feedsActive?: number;
   } | null>(null);
+  const [totalArticles, setTotalArticles] = useState<number>(0);
+  const [activeFeeds, setActiveFeeds] = useState<number>(0);
   const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
     fetchMonitorStatus();
+    fetchStatistics();
     // Refresh status every 30 seconds
-    const interval = setInterval(fetchMonitorStatus, 30000);
+    const interval = setInterval(() => {
+      fetchMonitorStatus();
+      fetchStatistics();
+    }, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -32,6 +40,26 @@ const Header: React.FC<HeaderProps> = ({ onSearch, searchQuery }) => {
       setMonitorStatus(status);
     } catch (error) {
       console.error('Failed to fetch monitor status:', error);
+    }
+  };
+
+  const fetchStatistics = async () => {
+    try {
+      const [articlesData, feedsData] = await Promise.all([
+        ApiService.getArticles({ limit: 1 }),
+        ApiService.getAssets()
+      ]);
+      
+      // Set total articles from pagination
+      if (articlesData.pagination) {
+        setTotalArticles(articlesData.pagination.totalItems || 0);
+      }
+      
+      // Count active feeds (this is a rough estimate based on asset categories)
+      const feedCount = feedsData.categories?.reduce((sum, cat) => sum + cat.assets.length, 0) || 0;
+      setActiveFeeds(Math.min(feedCount, 50)); // Cap at reasonable number
+    } catch (error) {
+      console.error('Failed to fetch statistics:', error);
     }
   };
 
@@ -103,11 +131,11 @@ const Header: React.FC<HeaderProps> = ({ onSearch, searchQuery }) => {
                 </div>
                 <span className="text-gray-300">•</span>
                 <span className="text-gray-600">
-                  {monitorStatus.articlesProcessed.toLocaleString()} articles
+                  {totalArticles ? totalArticles.toLocaleString() : monitorStatus.articlesProcessed?.toLocaleString() || '0'} articles
                 </span>
                 <span className="text-gray-300">•</span>
                 <span className="text-gray-600">
-                  {monitorStatus.feedsActive} feeds
+                  {activeFeeds ? activeFeeds : monitorStatus.feedsActive || monitorStatus.activeJobs || '0'} feeds
                 </span>
               </div>
             )}
