@@ -33,9 +33,9 @@ class PerformanceMonitorService {
       const startTime = Date.now();
       
       // Store original end method
-      const originalEnd = res.end;
+      const originalEnd = res.end.bind(res);
       
-      res.end = function(chunk?: any, encoding?: any) {
+      res.end = function(this: Response, chunk?: any, encoding?: any) {
         const duration = Date.now() - startTime;
         
         // Create performance metric
@@ -59,9 +59,9 @@ class PerformanceMonitorService {
           logger.error('Failed to store performance metric:', error);
         });
 
-        // Call original end method
-        originalEnd.call(this, chunk, encoding);
-      };
+        // Call original end method and return its result
+        return originalEnd(chunk, encoding);
+      } as any;
 
       next();
     };

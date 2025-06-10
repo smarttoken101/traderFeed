@@ -294,7 +294,13 @@ This document outlines the complete development roadmap for the TradeFeed applic
   - ✅ Database query optimization tests
   - ✅ Concurrent request handling tests
   - ✅ Memory usage and leak detection tests
-  - [ ] Unit tests for services
+  - ✅ Unit tests for RSS service
+  - ✅ Unit tests for Knowledge Base service
+  - ✅ Unit tests for COT service
+  - 🔄 Unit tests for Sentiment service (fixing export issues)
+  - 🔄 Unit tests for Vector Database service (fixing export issues)
+  - 🔄 Unit tests for Neo4j Graph service (fixing export issues)
+  - 🔄 Unit tests for Asset Monitor service (fixing API issues)
   - [ ] Integration tests for APIs
   - [ ] RSS feed parsing tests
   - [ ] Sentiment analysis accuracy tests

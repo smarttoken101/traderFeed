@@ -1,13 +1,16 @@
 import request from 'supertest';
-import app from '../app';
+import App from '../app';
 import Database from '../config/database';
 import RedisClient from '../config/redis';
 import PerformanceMonitorService from '../services/performance-monitor.service';
 
 describe('Performance Tests', () => {
+  let app: App;
+
   beforeAll(async () => {
     await Database.connect();
     await RedisClient.connect();
+    app = new App();
   });
 
   afterAll(async () => {
