@@ -10,6 +10,9 @@ import logger from './utils/logger';
 import Database from './config/database';
 import RedisClient from './config/redis';
 
+// Import middleware
+import PerformanceMonitorService from './services/performance-monitor.service';
+
 // Import routes
 import articleRoutes from './controllers/articles.controller';
 import feedRoutes from './controllers/feeds.controller';
@@ -33,6 +36,9 @@ class App {
   }
 
   private initializeMiddleware(): void {
+    // Performance monitoring (should be first to capture all requests)
+    this.app.use(PerformanceMonitorService.monitor());
+
     // Security middleware
     this.app.use(helmet());
     
@@ -93,6 +99,18 @@ class App {
         version: '1.0.0',
         timestamp: new Date().toISOString(),
       });
+    });
+
+    // Performance metrics endpoint
+    this.app.get('/api/metrics/performance', async (req: Request, res: Response) => {
+      try {
+        const timeRange = parseInt(req.query.timeRange as string) || 3600000; // 1 hour default
+        const report = await PerformanceMonitorService.generatePerformanceReport(timeRange);
+        res.json(report);
+      } catch (error) {
+        logger.error('Failed to generate performance report:', error);
+        res.status(500).json({ error: 'Failed to generate performance report' });
+      }
     });
 
     // API Routes

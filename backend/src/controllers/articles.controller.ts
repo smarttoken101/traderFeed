@@ -1,85 +1,159 @@
 import { Router, Request, Response } from 'express';
 import rssService from '../services/rss.service';
+import CacheMiddleware from '../middleware/cache.middleware';
+import PerformanceMonitorService from '../services/performance-monitor.service';
+import QueryOptimizer from '../utils/query-optimizer';
+import Database from '../config/database';
 import logger from '../utils/logger';
 
 const router = Router();
 
 /**
- * GET /api/articles - Get all articles with filtering
+ * GET /api/articles - Get all articles with filtering and caching
  */
-router.get('/', async (req: Request, res: Response) => {
-  try {
-    const {
-      page = 1,
-      limit = 20,
-      category,
-      sentiment,
-      instruments,
-    } = req.query;
+router.get('/', 
+  CacheMiddleware.cache({
+    ttl: 300, // 5 minutes
+    keyGenerator: CacheMiddleware.articleCacheKeyGenerator,
+    condition: (req) => req.method === 'GET' && !req.query.real_time,
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const {
+        page = 1,
+        limit = 20,
+        category,
+        sentiment,
+        market,
+        dateFrom,
+        dateTo,
+        search,
+      } = req.query;
 
-    const pageNum = parseInt(page as string);
-    const limitNum = parseInt(limit as string);
-    const offset = (pageNum - 1) * limitNum;
+      const pageNum = parseInt(page as string);
+      const limitNum = Math.min(parseInt(limit as string), 100); // Cap at 100
 
-    // Parse instruments if provided
-    let instrumentsArray: string[] = [];
-    if (instruments) {
-      instrumentsArray = Array.isArray(instruments) 
-        ? instruments as string[] 
-        : (instruments as string).split(',');
-    }
+      // Build optimized where clause
+      const where: any = {};
+      
+      if (category) where.category = category;
+      if (sentiment) where.sentimentLabel = sentiment;
+      if (market) {
+        where.markets = {
+          has: market as string,
+        };
+      }
+      if (search) {
+        where.OR = [
+          { title: { contains: search as string, mode: 'insensitive' } },
+          { description: { contains: search as string, mode: 'insensitive' } },
+        ];
+      }
+      if (dateFrom || dateTo) {
+        where.publishedAt = {};
+        if (dateFrom) where.publishedAt.gte = new Date(dateFrom as string);
+        if (dateTo) where.publishedAt.lte = new Date(dateTo as string);
+      }
 
-    const filters = {
-      category: category as string,
-      sentiment: sentiment as string,
-      limit: limitNum,
-      offset: offset,
-      instruments: instrumentsArray.length > 0 ? instrumentsArray : undefined,
-    };
+      // Use query optimizer
+      const optimizedQuery = QueryOptimizer.optimizeArticleQuery({
+        where,
+        skip: (pageNum - 1) * limitNum,
+        take: limitNum,
+      });
 
-    const articles = await rssService.getArticles(filters);
+      const prisma = Database.getInstance();
 
-    res.json({
-      success: true,
-      data: {
-        articles,
-        pagination: {
-          page: pageNum,
-          limit: limitNum,
-          total: articles.length,
+      // Execute optimized query with performance monitoring
+      const [articles, totalCount] = await Promise.all([
+        PerformanceMonitorService.monitorDatabaseQuery(
+          'articles.findMany',
+          () => prisma.article.findMany(optimizedQuery.query)
+        ),
+        PerformanceMonitorService.monitorDatabaseQuery(
+          'articles.count',
+          () => prisma.article.count({ where: optimizedQuery.query.where })
+        ),
+      ]);
+
+      // Get pagination metadata
+      const pagination = await QueryOptimizer.getPaginationMetadata(
+        prisma,
+        'articles',
+        where,
+        pageNum,
+        limitNum
+      );
+
+      res.json({
+        success: true,
+        data: {
+          articles,
+          pagination: {
+            ...pagination,
+            totalCount,
+          },
         },
-      },
-    });
-  } catch (error) {
-    logger.error('Error fetching articles:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch articles',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
+      });
+    } catch (error) {
+      logger.error('Error fetching articles:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch articles',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
-});
+);
 
 /**
- * GET /api/articles/sentiment-stats - Get sentiment statistics
+ * GET /api/articles/sentiment-stats - Get sentiment statistics with caching
  */
-router.get('/sentiment-stats', async (req: Request, res: Response) => {
-  try {
-    const stats = await rssService.getSentimentStats();
-    
-    res.json({
-      success: true,
-      data: stats,
-    });
-  } catch (error) {
-    logger.error('Error fetching sentiment stats:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch sentiment statistics',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
+router.get('/sentiment-stats',
+  CacheMiddleware.cache({
+    ttl: 900, // 15 minutes (sentiment stats change less frequently)
+    keyGenerator: (req) => 'api:articles:sentiment-stats',
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const prisma = Database.getInstance();
+      
+      const stats = await PerformanceMonitorService.monitorDatabaseQuery(
+        'articles.sentimentStats',
+        async () => {
+          const [positive, negative, neutral, total] = await Promise.all([
+            prisma.article.count({ where: { sentimentLabel: 'positive' } }),
+            prisma.article.count({ where: { sentimentLabel: 'negative' } }),
+            prisma.article.count({ where: { sentimentLabel: 'neutral' } }),
+            prisma.article.count(),
+          ]);
+
+          return {
+            positive,
+            negative,
+            neutral,
+            total,
+            positivePercentage: total > 0 ? Math.round((positive / total) * 100) : 0,
+            negativePercentage: total > 0 ? Math.round((negative / total) * 100) : 0,
+            neutralPercentage: total > 0 ? Math.round((neutral / total) * 100) : 0,
+          };
+        }
+      );
+      
+      res.json({
+        success: true,
+        data: stats,
+      });
+    } catch (error) {
+      logger.error('Error fetching sentiment stats:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch sentiment statistics',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
-});
+);
 
 /**
  * POST /api/articles/process - Manually trigger RSS feed processing
@@ -103,50 +177,87 @@ router.post('/process', async (req: Request, res: Response) => {
 });
 
 /**
- * GET /api/articles/categories - Get available categories
+ * GET /api/articles/categories - Get available categories with caching
  */
-router.get('/categories', async (req: Request, res: Response) => {
-  try {
-    const categories = ['forex', 'crypto', 'futures', 'general'];
-    
-    res.json({
-      success: true,
-      data: categories,
-    });
-  } catch (error) {
-    logger.error('Error fetching categories:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch categories',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
+router.get('/categories',
+  CacheMiddleware.cache({
+    ttl: 3600, // 1 hour (categories rarely change)
+    keyGenerator: (req) => 'api:articles:categories',
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const prisma = Database.getInstance();
+      
+      const categories = await PerformanceMonitorService.monitorDatabaseQuery(
+        'feeds.distinct.category',
+        () => prisma.rssFeed.findMany({
+          select: { category: true },
+          distinct: ['category'],
+          where: { isActive: true },
+        })
+      );
+      
+      const categoryList = categories.map(c => c.category);
+      
+      res.json({
+        success: true,
+        data: categoryList,
+      });
+    } catch (error) {
+      logger.error('Error fetching categories:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch categories',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
-});
+);
 
 /**
- * GET /api/articles/instruments - Get detected instruments
+ * GET /api/articles/instruments - Get detected instruments with caching
  */
-router.get('/instruments', async (req: Request, res: Response) => {
-  try {
-    // This would ideally come from the database
-    const instruments = [
-      'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'USDCAD', 'NZDUSD', 'USDCHF',
-      'BITCOIN', 'ETHEREUM', 'BTC', 'ETH', 'XRP', 'LTC', 'ADA',
-      'GOLD', 'SILVER', 'OIL', 'CRUDE', 'NATURAL GAS', 'WHEAT', 'CORN'
-    ];
-    
-    res.json({
-      success: true,
-      data: instruments,
-    });
-  } catch (error) {
-    logger.error('Error fetching instruments:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch instruments',
-      error: error instanceof Error ? error.message : 'Unknown error',
-    });
+router.get('/instruments',
+  CacheMiddleware.cache({
+    ttl: 1800, // 30 minutes
+    keyGenerator: (req) => 'api:articles:instruments',
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const prisma = Database.getInstance();
+      
+      const instrumentsData = await PerformanceMonitorService.monitorDatabaseQuery(
+        'articles.distinct.instruments',
+        async () => {
+          const articles = await prisma.article.findMany({
+            select: { instruments: true },
+            where: {
+              instruments: { isEmpty: false },
+              publishedAt: {
+                gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // Last 30 days
+              },
+            },
+          });
+
+          // Flatten and get unique instruments
+          const allInstruments = articles.flatMap(a => a.instruments);
+          return [...new Set(allInstruments)].sort();
+        }
+      );
+      
+      res.json({
+        success: true,
+        data: instrumentsData,
+      });
+    } catch (error) {
+      logger.error('Error fetching instruments:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to fetch instruments',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
   }
-});
+);
 
 export default router;

@@ -1,0 +1,310 @@
+import Database from '../config/database';
+import QueryOptimizer from '../utils/query-optimizer';
+import logger from '../utils/logger';
+
+class DatabaseOptimizer {
+  /**
+   * Create all recommended database indexes
+   */
+  public static async createIndexes(): Promise<void> {
+    try {
+      const prisma = Database.getInstance();
+      const indexQueries = QueryOptimizer.getDatabaseIndexRecommendations();
+
+      logger.info('Starting database index optimization...');
+
+      for (const query of indexQueries) {
+        try {
+          await prisma.$executeRawUnsafe(query);
+          logger.info(`Created index: ${query}`);
+        } catch (error) {
+          // Index might already exist, which is fine
+          if (error instanceof Error && error.message.includes('already exists')) {
+            logger.debug(`Index already exists: ${query}`);
+          } else {
+            logger.error(`Failed to create index: ${query}`, error);
+          }
+        }
+      }
+
+      logger.info('Database index optimization completed');
+    } catch (error) {
+      logger.error('Database optimization failed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Analyze database performance and suggest optimizations
+   */
+  public static async analyzePerformance(): Promise<any> {
+    try {
+      const prisma = Database.getInstance();
+
+      logger.info('Analyzing database performance...');
+
+      // Get table sizes
+      const tableSizes = await prisma.$queryRaw`
+        SELECT 
+          schemaname,
+          tablename,
+          attname,
+          n_distinct,
+          correlation
+        FROM pg_stats 
+        WHERE schemaname = 'public'
+        ORDER BY schemaname, tablename;
+      `;
+
+      // Get slow query statistics (if available)
+      const slowQueries = await prisma.$queryRaw`
+        SELECT 
+          query,
+          calls,
+          total_time,
+          mean_time,
+          min_time,
+          max_time
+        FROM pg_stat_statements 
+        WHERE mean_time > 100
+        ORDER BY mean_time DESC
+        LIMIT 10;
+      ` catch (error) => {
+        // pg_stat_statements might not be enabled
+        logger.debug('pg_stat_statements not available');
+        return [];
+      };
+
+      // Get index usage statistics
+      const indexUsage = await prisma.$queryRaw`
+        SELECT 
+          indexrelname as index_name,
+          relname as table_name,
+          idx_scan as times_used,
+          idx_tup_read as tuples_read,
+          idx_tup_fetch as tuples_fetched
+        FROM pg_stat_user_indexes 
+        ORDER BY idx_scan DESC;
+      `;
+
+      // Get table statistics
+      const tableStats = await prisma.$queryRaw`
+        SELECT 
+          relname as table_name,
+          n_tup_ins as inserts,
+          n_tup_upd as updates,
+          n_tup_del as deletes,
+          n_live_tup as live_tuples,
+          n_dead_tup as dead_tuples
+        FROM pg_stat_user_tables
+        ORDER BY n_live_tup DESC;
+      `;
+
+      return {
+        tableSizes,
+        slowQueries,
+        indexUsage,
+        tableStats,
+        recommendations: this.generateRecommendations(tableStats, indexUsage),
+      };
+    } catch (error) {
+      logger.error('Performance analysis failed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generate optimization recommendations based on statistics
+   */
+  private static generateRecommendations(tableStats: any[], indexUsage: any[]): string[] {
+    const recommendations: string[] = [];
+
+    // Check for tables with many dead tuples (need VACUUM)
+    tableStats.forEach((table: any) => {
+      const deadTupleRatio = table.dead_tuples / (table.live_tuples + table.dead_tuples);
+      if (deadTupleRatio > 0.1) {
+        recommendations.push(`Table '${table.table_name}' has ${Math.round(deadTupleRatio * 100)}% dead tuples. Consider running VACUUM.`);
+      }
+    });
+
+    // Check for unused indexes
+    indexUsage.forEach((index: any) => {
+      if (index.times_used === 0) {
+        recommendations.push(`Index '${index.index_name}' on table '${index.table_name}' is never used. Consider dropping it.`);
+      }
+    });
+
+    // Check for large tables without recent updates
+    tableStats.forEach((table: any) => {
+      if (table.live_tuples > 100000 && table.updates === 0) {
+        recommendations.push(`Large table '${table.table_name}' with ${table.live_tuples} rows has no updates. Consider partitioning or archiving old data.`);
+      }
+    });
+
+    return recommendations;
+  }
+
+  /**
+   * Run database maintenance tasks
+   */
+  public static async runMaintenance(): Promise<void> {
+    try {
+      const prisma = Database.getInstance();
+
+      logger.info('Starting database maintenance...');
+
+      // Analyze tables to update statistics
+      await prisma.$executeRaw`ANALYZE;`;
+      logger.info('Table statistics updated');
+
+      // Vacuum tables to reclaim space
+      await prisma.$executeRaw`VACUUM ANALYZE;`;
+      logger.info('Database vacuumed and analyzed');
+
+      logger.info('Database maintenance completed');
+    } catch (error) {
+      logger.error('Database maintenance failed:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get database connection pool statistics
+   */
+  public static async getConnectionStats(): Promise<any> {
+    try {
+      const prisma = Database.getInstance();
+
+      const connectionStats = await prisma.$queryRaw`
+        SELECT 
+          state,
+          count(*) as connection_count
+        FROM pg_stat_activity 
+        WHERE datname = current_database()
+        GROUP BY state;
+      `;
+
+      const totalConnections = await prisma.$queryRaw`
+        SELECT count(*) as total
+        FROM pg_stat_activity 
+        WHERE datname = current_database();
+      `;
+
+      return {
+        connectionsByState: connectionStats,
+        totalConnections,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      logger.error('Failed to get connection stats:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Optimize specific queries based on usage patterns
+   */
+  public static async optimizeQueries(): Promise<void> {
+    try {
+      const prisma = Database.getInstance();
+
+      logger.info('Optimizing common query patterns...');
+
+      // Create composite indexes for common query patterns
+      const compositeIndexes = [
+        // Articles: commonly filtered by market and date
+        `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_articles_markets_published_at 
+         ON "Article" USING GIN(markets) INCLUDE (publishedAt);`,
+        
+        // Articles: sentiment analysis queries
+        `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_articles_sentiment_published_at 
+         ON "Article"(sentimentLabel, publishedAt DESC) WHERE sentimentLabel IS NOT NULL;`,
+        
+        // COT data: market and date queries
+        `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_cot_instrument_date 
+         ON "CotData"(instrumentCode, reportDate DESC);`,
+        
+        // Documents: category and upload date
+        `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_documents_category_uploaded 
+         ON "Document"(category, uploadedAt DESC) WHERE category IS NOT NULL;`,
+      ];
+
+      for (const indexQuery of compositeIndexes) {
+        try {
+          await prisma.$executeRawUnsafe(indexQuery);
+          logger.info(`Created composite index: ${indexQuery.split('\n')[0]}`);
+        } catch (error) {
+          if (error instanceof Error && error.message.includes('already exists')) {
+            logger.debug('Composite index already exists');
+          } else {
+            logger.error('Failed to create composite index:', error);
+          }
+        }
+      }
+
+      logger.info('Query optimization completed');
+    } catch (error) {
+      logger.error('Query optimization failed:', error);
+      throw error;
+    }
+  }
+}
+
+// CLI interface for running optimization tasks
+if (require.main === module) {
+  const command = process.argv[2];
+
+  async function main() {
+    try {
+      await Database.connect();
+
+      switch (command) {
+        case 'indexes':
+          await DatabaseOptimizer.createIndexes();
+          break;
+        case 'analyze':
+          const analysis = await DatabaseOptimizer.analyzePerformance();
+          console.log(JSON.stringify(analysis, null, 2));
+          break;
+        case 'maintenance':
+          await DatabaseOptimizer.runMaintenance();
+          break;
+        case 'optimize':
+          await DatabaseOptimizer.createIndexes();
+          await DatabaseOptimizer.optimizeQueries();
+          await DatabaseOptimizer.runMaintenance();
+          break;
+        case 'connections':
+          const stats = await DatabaseOptimizer.getConnectionStats();
+          console.log(JSON.stringify(stats, null, 2));
+          break;
+        default:
+          console.log(`
+Usage: npm run optimize-db <command>
+
+Commands:
+  indexes     - Create recommended database indexes
+  analyze     - Analyze database performance
+  maintenance - Run database maintenance (VACUUM, ANALYZE)
+  optimize    - Run full optimization (indexes + queries + maintenance)
+  connections - Show database connection statistics
+
+Examples:
+  npm run optimize-db indexes
+  npm run optimize-db analyze
+  npm run optimize-db optimize
+          `);
+          break;
+      }
+    } catch (error) {
+      logger.error('Database optimization script failed:', error);
+      process.exit(1);
+    } finally {
+      await Database.disconnect();
+    }
+  }
+
+  main();
+}
+
+export default DatabaseOptimizer;
