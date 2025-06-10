@@ -1,0 +1,147 @@
+import React from 'react';
+import { ExternalLink, Clock, Tag, TrendingUp } from 'lucide-react';
+import type { Article } from '../services/api';
+import { 
+  formatRelativeTime, 
+  getSentimentColor, 
+  getSentimentIcon, 
+  truncateText,
+  getCategoryIcon,
+  classNames
+} from '../utils/helpers';
+
+interface ArticleCardProps {
+  article: Article;
+  showFullContent?: boolean;
+  onAssetClick?: (asset: string) => void;
+}
+
+const ArticleCard: React.FC<ArticleCardProps> = ({ 
+  article, 
+  showFullContent = false,
+  onAssetClick 
+}) => {
+  const sentimentColor = getSentimentColor(article.sentimentLabel);
+  const sentimentIcon = getSentimentIcon(article.sentimentLabel);
+
+  const handleAssetClick = (asset: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onAssetClick?.(asset);
+  };
+
+  const openArticle = () => {
+    window.open(article.url, '_blank', 'noopener,noreferrer');
+  };
+
+  return (
+    <div className="card hover:shadow-lg transition-all duration-200 cursor-pointer" onClick={openArticle}>
+      {/* Header */}
+      <div className="flex items-start justify-between mb-3">
+        <div className="flex items-center space-x-2 text-sm text-gray-500">
+          <span className="flex items-center space-x-1">
+            {article.feed && (
+              <>
+                <span>{getCategoryIcon(article.feed.category)}</span>
+                <span className="font-medium">{article.feed.name}</span>
+                <span>•</span>
+              </>
+            )}
+            <Clock className="h-4 w-4" />
+            <span>{formatRelativeTime(article.publishedAt)}</span>
+          </span>
+        </div>
+        
+        {/* Sentiment Badge */}
+        <div className={classNames(
+          'badge',
+          sentimentColor
+        )}>
+          <span className="mr-1">{sentimentIcon}</span>
+          {article.sentimentLabel}
+          <span className="ml-1 text-xs">
+            ({(article.sentimentScore * 100).toFixed(0)}%)
+          </span>
+        </div>
+      </div>
+
+      {/* Title */}
+      <h3 className="text-lg font-semibold text-gray-900 mb-2 line-clamp-2 hover:text-primary-600 transition-colors">
+        {article.title}
+      </h3>
+
+      {/* Content Preview */}
+      {article.content && (
+        <p className="text-gray-600 mb-4 line-clamp-3">
+          {showFullContent ? article.content : truncateText(article.content, 200)}
+        </p>
+      )}
+
+      {/* Assets/Instruments Tags */}
+      {article.instruments && article.instruments.length > 0 && (
+        <div className="mb-4">
+          <div className="flex items-center space-x-1 mb-2">
+            <TrendingUp className="h-4 w-4 text-gray-400" />
+            <span className="text-sm font-medium text-gray-700">Assets:</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {article.instruments.slice(0, 6).map((instrument) => (
+              <button
+                key={instrument}
+                onClick={(e) => handleAssetClick(instrument, e)}
+                className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-primary-100 text-primary-800 hover:bg-primary-200 transition-colors"
+              >
+                {instrument}
+              </button>
+            ))}
+            {article.instruments.length > 6 && (
+              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
+                +{article.instruments.length - 6} more
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Markets Tags */}
+      {article.markets && article.markets.length > 0 && (
+        <div className="mb-4">
+          <div className="flex items-center space-x-1 mb-2">
+            <Tag className="h-4 w-4 text-gray-400" />
+            <span className="text-sm font-medium text-gray-700">Markets:</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {article.markets.map((market) => (
+              <span
+                key={market}
+                className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700"
+              >
+                {getCategoryIcon(market)} {market}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Footer */}
+      <div className="flex items-center justify-between pt-3 border-t border-gray-200">
+        <div className="text-sm text-gray-500">
+          Source: <span className="font-medium">{article.source}</span>
+        </div>
+        
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            openArticle();
+          }}
+          className="inline-flex items-center space-x-1 text-sm text-primary-600 hover:text-primary-700 font-medium"
+        >
+          <span>Read more</span>
+          <ExternalLink className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default ArticleCard;

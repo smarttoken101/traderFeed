@@ -1,0 +1,279 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  username  String   @unique
+  password  String
+  firstName String?
+  lastName  String?
+  avatar    String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // User preferences
+  preferences   UserPreferences?
+  bookmarks     Bookmark[]
+  alerts        Alert[]
+  reports       Report[]
+
+  @@map("users")
+}
+
+model UserPreferences {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Market preferences
+  preferredMarkets String[] // ["forex", "crypto", "futures"]
+  alertFrequency   String   @default("daily") // "real-time", "daily", "weekly"
+  reportSchedule   String   @default("weekly") // "daily", "weekly", "monthly"
+  
+  // Display preferences
+  theme            String   @default("light") // "light", "dark"
+  timezone         String   @default("UTC")
+  language         String   @default("en")
+  
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("user_preferences")
+}
+
+model RssFeed {
+  id          String   @id @default(cuid())
+  name        String
+  url         String   @unique
+  category    String   // "forex", "crypto", "futures", "general"
+  isActive    Boolean  @default(true)
+  lastFetched DateTime?
+  fetchError  String?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  articles    Article[]
+
+  @@map("rss_feeds")
+}
+
+model Article {
+  id            String   @id @default(cuid())
+  title         String
+  description   String?
+  content       String?
+  link          String   @unique
+  author        String?
+  publishedAt   DateTime
+  
+  // Source information
+  feedId        String
+  feed          RssFeed  @relation(fields: [feedId], references: [id], onDelete: Cascade)
+  
+  // Content analysis
+  originalText  String?
+  rewrittenText String?
+  summary       String?
+  
+  // Market classification
+  markets       String[] // ["forex", "crypto", "futures"]
+  instruments   String[] // ["EURUSD", "BTCUSD", "CL", etc.]
+  
+  // Sentiment analysis
+  sentimentScore     Float?   // -1 to 1
+  sentimentLabel     String?  // "positive", "negative", "neutral"
+  sentimentMethod    String?  // "vader", "textblob", "llm"
+  sentimentConfidence Float?
+  
+  // Processing status
+  isProcessed   Boolean  @default(false)
+  processingError String?
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  bookmarks     Bookmark[]
+  
+  @@map("articles")
+}
+
+model CotData {
+  id              String   @id @default(cuid())
+  reportDate      DateTime
+  instrumentCode  String   // "EURUSD", "GC", "CL", etc.
+  instrumentName  String   // "Euro FX", "Gold", "Crude Oil"
+  
+  // Legacy COT data
+  commercialLong    Int?
+  commercialShort   Int?
+  commercialNet     Int?
+  
+  noncommercialLong  Int?
+  noncommercialShort Int?
+  noncommercialNet   Int?
+  
+  nonreportableLong  Int?
+  nonreportableShort Int?
+  nonreportableNet   Int?
+  
+  // Disaggregated COT data (when available)
+  producerLong       Int?
+  producerShort      Int?
+  swapLong           Int?
+  swapShort          Int?
+  managedMoneyLong   Int?
+  managedMoneyShort  Int?
+  otherReportableLong Int?
+  otherReportableShort Int?
+  
+  // Analysis fields
+  netPositionPercentile Float? // Historical percentile of current positioning
+  positionChange        Int?   // Week-over-week change
+  sentiment            String? // "bullish", "bearish", "neutral"
+  
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  
+  @@unique([reportDate, instrumentCode])
+  @@map("cot_data")
+}
+
+model Document {
+  id           String   @id @default(cuid())
+  title        String
+  filename     String
+  originalName String
+  filePath     String
+  fileSize     Int
+  mimeType     String
+  
+  // Content
+  content      String?  // Extracted text content
+  summary      String?  // AI-generated summary
+  
+  // Categorization
+  category     String?  // "strategy", "research", "analysis", etc.
+  tags         String[]
+  markets      String[] // ["forex", "crypto", "futures"]
+  
+  // Vector embedding for semantic search
+  embedding    Float[] // Vector representation of document
+  
+  // Processing status
+  isProcessed  Boolean  @default(false)
+  processingError String?
+  
+  // Metadata
+  uploadedBy   String?  // User ID who uploaded
+  isPublic     Boolean  @default(false)
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  @@map("documents")
+}
+
+model Report {
+  id           String   @id @default(cuid())
+  title        String
+  type         String   // "daily", "weekly", "monthly", "custom"
+  content      String   // Generated report content
+  summary      String?  // Executive summary
+  
+  // Report parameters
+  markets      String[] // Markets covered in report
+  dateFrom     DateTime
+  dateTo       DateTime
+  
+  // Data sources used
+  articlesCount Int     @default(0)
+  cotDataCount  Int     @default(0)
+  documentsUsed String[] // Document IDs referenced
+  
+  // Generation metadata
+  generatedBy   String?  // User ID or "system"
+  generationTime Int?    // Time taken to generate (seconds)
+  model         String?  // AI model used for generation
+  
+  // User relations
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@map("reports")
+}
+
+model Bookmark {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  articleId String
+  article   Article  @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  
+  notes     String?
+  tags      String[]
+  
+  createdAt DateTime @default(now())
+  
+  @@unique([userId, articleId])
+  @@map("bookmarks")
+}
+
+model Alert {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  name        String
+  description String?
+  
+  // Alert conditions
+  markets     String[] // Markets to monitor
+  keywords    String[] // Keywords to watch for
+  sentimentThreshold Float? // Trigger on sentiment above/below threshold
+  
+  // Alert settings
+  isActive    Boolean  @default(true)
+  frequency   String   @default("immediate") // "immediate", "daily", "weekly"
+  lastTriggered DateTime?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@map("alerts")
+}
+
+model ProcessingJob {
+  id          String   @id @default(cuid())
+  type        String   // "rss_fetch", "sentiment_analysis", "cot_download", "report_generation"
+  status      String   @default("pending") // "pending", "running", "completed", "failed"
+  
+  // Job data
+  input       Json?    // Job input parameters
+  output      Json?    // Job results
+  error       String?  // Error message if failed
+  
+  // Timing
+  startedAt   DateTime?
+  completedAt DateTime?
+  duration    Int?     // Duration in seconds
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@map("processing_jobs")
+}

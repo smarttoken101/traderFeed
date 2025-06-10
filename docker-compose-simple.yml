@@ -1,0 +1,11 @@
+services:
+  # Test Redis first with host networking
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:

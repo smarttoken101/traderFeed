@@ -1,0 +1,9 @@
+{
+  "servers": [
+    {
+      "id": "context7",
+      "type": "module",
+      "module": "@upstash/context7-mcp"
+    }
+  ]
+}
