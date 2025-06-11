@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { BarChart3, TrendingUp, Clock, AlertCircle } from 'lucide-react';
+import { BarChart3, TrendingUp, Clock, AlertCircle, FileText } from 'lucide-react';
 import ArticleCard from '../components/ArticleCard';
 import AssetCard from '../components/AssetCard';
 import SearchAndFilters from '../components/SearchAndFilters';
+import SentimentReportModal from '../components/SentimentReportModal';
+import COTWidget from '../components/COTWidget';
 import ApiService from '../services/api';
 import type { Article, TrendingAsset, AssetStatistics } from '../services/api';
 import { formatNumber } from '../utils/helpers';
@@ -27,6 +29,7 @@ const Dashboard: React.FC<DashboardProps> = ({ searchQuery }) => {
   const [selectedSentiment, setSelectedSentiment] = useState('all');
   const [timeframe, setTimeframe] = useState('24h');
   const [availableAssets, setAvailableAssets] = useState<string[]>([]);
+  const [showSentimentReport, setShowSentimentReport] = useState(false);
 
   useEffect(() => {
     fetchInitialData();
@@ -295,6 +298,19 @@ const Dashboard: React.FC<DashboardProps> = ({ searchQuery }) => {
           </div>
         )}
 
+        {/* Sentiment Report Button */}
+        {statistics && (
+          <div className="mb-8">
+            <button
+              onClick={() => setShowSentimentReport(true)}
+              className="btn-primary flex items-center space-x-2"
+            >
+              <FileText className="h-4 w-4" />
+              <span>Generate Sentiment Report</span>
+            </button>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
           {/* Articles */}
           <div className="lg:col-span-3">
@@ -347,32 +363,44 @@ const Dashboard: React.FC<DashboardProps> = ({ searchQuery }) => {
 
           {/* Trending Assets Sidebar */}
           <div className="lg:col-span-1">
-            <div className="sticky top-6">
-              <h3 className="text-lg font-bold text-gray-900 mb-6">Trending Assets</h3>
-              {trendingAssets.length > 0 ? (
-                <div className="space-y-4">
-                  {trendingAssets.slice(0, 8).map((asset) => (
-                    <AssetCard
-                      key={asset.asset}
-                      asset={asset}
-                      onClick={handleAssetClick}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-8">
-                  <div className="animate-pulse space-y-3">
-                    {[...Array(5)].map((_, i) => (
-                      <div key={i} className="bg-gray-200 h-16 rounded-lg"></div>
+            <div className="sticky top-6 space-y-6">
+              {/* Trending Assets */}
+              <div>
+                <h3 className="text-lg font-bold text-gray-900 mb-6">Trending Assets</h3>
+                {trendingAssets.length > 0 ? (
+                  <div className="space-y-4">
+                    {trendingAssets.slice(0, 6).map((asset) => (
+                      <AssetCard
+                        key={asset.asset}
+                        asset={asset}
+                        onClick={handleAssetClick}
+                      />
                     ))}
                   </div>
-                  <p className="text-gray-600 mt-4">Loading trending assets...</p>
-                </div>
-              )}
+                ) : (
+                  <div className="text-center py-8">
+                    <div className="animate-pulse space-y-3">
+                      {[...Array(5)].map((_, i) => (
+                        <div key={i} className="bg-gray-200 h-16 rounded-lg"></div>
+                      ))}
+                    </div>
+                    <p className="text-gray-600 mt-4">Loading trending assets...</p>
+                  </div>
+                )}
+              </div>
+
+              {/* COT Widget */}
+              <COTWidget />
             </div>
           </div>
         </div>
       </main>
+
+      {/* Sentiment Report Modal */}
+      <SentimentReportModal
+        isOpen={showSentimentReport}
+        onClose={() => setShowSentimentReport(false)}
+      />
     </div>
   );
 };

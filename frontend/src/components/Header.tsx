@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Bell, Activity, TrendingUp, RefreshCw, Brain, Home } from 'lucide-react';
+import { Search, Bell, Activity, TrendingUp, RefreshCw, Brain, Home, BarChart3 } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import ApiService from '../services/api';
 import { formatRelativeTime } from '../utils/helpers';
@@ -103,6 +103,18 @@ const Header: React.FC<HeaderProps> = ({ onSearch, searchQuery }) => {
               >
                 <Home className="h-4 w-4" />
                 <span>Dashboard</span>
+              </Link>
+
+              <Link 
+                to="/cot" 
+                className={`flex items-center space-x-1 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                  location.pathname === '/cot' 
+                    ? 'bg-blue-100 text-blue-700' 
+                    : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                }`}
+              >
+                <BarChart3 className="h-4 w-4" />
+                <span>COT Analysis</span>
               </Link>
               
               <Link 

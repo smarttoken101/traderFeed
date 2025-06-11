@@ -24,6 +24,7 @@ import knowledgeRoutes from './routes/knowledge.routes';
 import rssMonitorJob from './jobs/rss-monitor.job';
 import assetMonitorService from './services/asset-monitor.service';
 import knowledgeJobScheduler from './jobs/knowledge-scheduler.job';
+import sentimentJobScheduler from './jobs/sentiment-scheduler.job';
 
 class App {
   public app: Express;
@@ -161,6 +162,9 @@ class App {
       
       // Start knowledge base jobs
       knowledgeJobScheduler.startAll();
+      
+      // Start sentiment analysis jobs
+      sentimentJobScheduler.startAll();
 
       // Start server
       this.app.listen(config.port, () => {
@@ -184,6 +188,9 @@ class App {
       
       // Stop knowledge base jobs
       knowledgeJobScheduler.stopAll();
+      
+      // Stop sentiment analysis jobs
+      sentimentJobScheduler.stopAll();
 
       logger.info('Server stopped gracefully');
     } catch (error) {

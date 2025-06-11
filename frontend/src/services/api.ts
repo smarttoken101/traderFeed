@@ -196,6 +196,14 @@ class ApiService {
     }[]>('/articles/sentiment-stats');
   }
 
+  async getSentimentReport(timeframe: '24h' | '7d' | '30d' = '24h') {
+    return this.request<{
+      report: string;
+      timeframe: string;
+      generatedAt: string;
+    }>(`/articles/sentiment-report?timeframe=${timeframe}`);
+  }
+
   // Manual operations
   async triggerRssProcessing() {
     return this.request('/assets/process', {
@@ -224,6 +232,93 @@ class ApiService {
     return this.request('/assets/monitor/stop', {
       method: 'POST',
     });
+  }
+
+  // COT (Commitment of Traders) endpoints
+  async getCotSummary() {
+    return this.request<{
+      lastUpdated: string;
+      totalInstruments: number;
+      bullishSignals: number;
+      bearishSignals: number;
+      neutralSignals: number;
+      topMoversBullish: Array<{ instrument: string; change: number }>;
+      topMoversBearish: Array<{ instrument: string; change: number }>;
+    }>('/cot/summary');
+  }
+
+  async getCotSignals() {
+    return this.request<Array<{
+      instrument: string;
+      instrumentName: string;
+      signal: 'buy' | 'sell' | 'hold';
+      confidence: number;
+      sentiment: 'bullish' | 'bearish' | 'neutral';
+      percentile: number;
+      weeklyChange: number;
+      reasoning: string;
+    }>>('/cot/signals');
+  }
+
+  async getCotData(instrument: string, limit: number = 52) {
+    return this.request<{
+      instrument: string;
+      data: Array<{
+        reportDate: string;
+        commercialLong: number;
+        commercialShort: number;
+        commercialNet: number;
+        noncommercialLong: number;
+        noncommercialShort: number;
+        noncommercialNet: number;
+        managedMoneyLong?: number;
+        managedMoneyShort?: number;
+      }>;
+    }>(`/cot/${instrument}?limit=${limit}`);
+  }
+
+  async analyzeCotPositioning(instrument: string, lookbackWeeks: number = 52) {
+    return this.request<{
+      instrument: string;
+      analysis: {
+        instrumentCode: string;
+        instrumentName: string;
+        currentPositioning: {
+          commercialNet: number;
+          noncommercialNet: number;
+          managedMoneyNet?: number;
+        };
+        historicalPercentile: number;
+        weeklyChange: number;
+        sentiment: 'bullish' | 'bearish' | 'neutral';
+        signal: 'buy' | 'sell' | 'hold';
+        confidence: number;
+        analysis: string;
+      };
+    }>(`/cot/analyze/${instrument}`, {
+      method: 'POST',
+      body: JSON.stringify({ lookbackWeeks }),
+    });
+  }
+
+  async triggerCotUpdate() {
+    return this.request('/cot/update', {
+      method: 'POST',
+    });
+  }
+
+  async getCotReport(timeframe: '1w' | '4w' | '12w' = '4w') {
+    return this.request<{
+      report: string;
+      timeframe: string;
+      generatedAt: string;
+      summary: {
+        totalInstruments: number;
+        bullishSignals: number;
+        bearishSignals: number;
+        neutralSignals: number;
+      };
+    }>(`/cot/report?timeframe=${timeframe}`);
   }
 }
 

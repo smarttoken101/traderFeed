@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import rssService from '../services/rss.service';
+import SentimentService from '../services/sentiment.service';
 import CacheMiddleware from '../middleware/cache.middleware';
 import PerformanceMonitorService from '../services/performance-monitor.service';
 import QueryOptimizer from '../utils/query-optimizer';
@@ -149,6 +150,57 @@ router.get('/sentiment-stats',
       res.status(500).json({
         success: false,
         message: 'Failed to fetch sentiment statistics',
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  }
+);
+
+/**
+ * GET /api/articles/sentiment-report - Generate comprehensive sentiment report
+ */
+router.get('/sentiment-report',
+  CacheMiddleware.cache({
+    ttl: 1800, // 30 minutes (reports are resource-intensive to generate)
+    keyGenerator: (req) => `api:articles:sentiment-report:${req.query.timeframe || '24h'}`,
+  }),
+  async (req: Request, res: Response) => {
+    try {
+      const { timeframe = '24h' } = req.query;
+      
+      // Validate timeframe
+      const validTimeframes = ['24h', '7d', '30d'];
+      if (!validTimeframes.includes(timeframe as string)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid timeframe. Must be one of: 24h, 7d, 30d',
+        });
+      }
+
+      const sentimentService = new SentimentService();
+      
+      const report = await sentimentService.generateSentimentReport(timeframe as string);
+      
+      if (!report) {
+        return res.status(503).json({
+          success: false,
+          message: 'Sentiment report generation is currently unavailable. Gemini AI may not be configured.',
+        });
+      }
+
+      res.json({
+        success: true,
+        data: {
+          report,
+          timeframe,
+          generatedAt: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      logger.error('Error generating sentiment report:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Failed to generate sentiment report',
         error: error instanceof Error ? error.message : 'Unknown error',
       });
     }
