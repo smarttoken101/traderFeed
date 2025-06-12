@@ -48,7 +48,7 @@ const config: Config = {
   jwtSecret: process.env.JWT_SECRET || 'your-secret-key',
 
   // Database
-  databaseUrl: process.env.DATABASE_URL || '',
+  databaseUrl: process.env.DATABASE_URL || 'file:./dev.db',
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
 
   // External APIs
@@ -79,11 +79,11 @@ const config: Config = {
   logFile: process.env.LOG_FILE || 'logs/app.log',
 };
 
-// Validate required configuration
+// Validate required configuration but don't exit during tests
 const requiredEnvVars = ['DATABASE_URL'];
 const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
 
-if (missingEnvVars.length > 0) {
+if (missingEnvVars.length > 0 && process.env.NODE_ENV !== 'test') {
   console.error('Missing required environment variables:', missingEnvVars);
   process.exit(1);
 }
