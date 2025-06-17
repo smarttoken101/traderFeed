@@ -1,467 +1,310 @@
-import { KnowledgeBaseService } from '../../services/knowledge-base.service';
+import { KnowledgeBaseService, DocumentProcessingResult, MatchedChunk, KnowledgeResult, KnowledgeQuery } from '../../services/knowledge-base.service';
 import { PrismaClient } from '@prisma/client';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
 import fs from 'fs/promises';
 import pdfParse from 'pdf-parse';
 import mammoth from 'mammoth';
-import logger from '../../utils/logger';
 import { vectorDatabaseService } from '../../services/vector-database.service';
 import { neo4jGraphService } from '../../services/neo4j-graph.service';
+import config from '../../config';
+import logger from '../../utils/logger';
+import path from 'path'; // Import path for knowledgeBasePath
 
-// Mock dependencies
-jest.mock('@prisma/client');
-jest.mock('@google/generative-ai');
+// --- MOCKS ---
 jest.mock('fs/promises');
 jest.mock('pdf-parse');
 jest.mock('mammoth');
-jest.mock('../../utils/logger');
-jest.mock('../../services/vector-database.service');
-jest.mock('../../services/neo4j-graph.service');
+jest.mock('@google/generative-ai');
+jest.mock('../../services/vector-database.service', () => ({
+  vectorDatabaseService: {
+    storeDocumentChunks: jest.fn(),
+    searchSimilarDocuments: jest.fn(),
+    processAndStoreDocument: jest.fn(),
+  }
+}));
+jest.mock('../../services/neo4j-graph.service', () => ({
+  neo4jGraphService: {
+    processDocumentForGraph: jest.fn(),
+  }
+}));
 
-// Mock data
-const mockDocument = {
-  id: 'doc-123',
-  title: 'Trading Strategy Analysis',
-  filename: 'strategy.pdf',
-  originalName: 'strategy.pdf',
-  filePath: '/path/to/strategy.pdf',
-  fileSize: 1024000,
-  mimeType: 'application/pdf',
-  content: 'This is a comprehensive trading strategy document...',
-  summary: 'A trading strategy focused on forex markets...',
-  category: 'strategy',
-  tags: ['forex', 'trading', 'analysis'],
-  markets: ['forex'],
-  embedding: new Array(1536).fill(0.1),
-  isProcessed: true,
-  processingError: null,
-  uploadedBy: null,
-  isPublic: false,
-  createdAt: new Date(),
-  updatedAt: new Date(),
-};
-
-const mockProcessingResult = {
-  id: 'doc-123',
-  title: 'Trading Strategy Analysis',
-  content: 'This is a comprehensive trading strategy document...',
-  summary: 'A trading strategy focused on forex markets...',
-  category: 'strategy',
-  tags: ['forex', 'trading', 'analysis'],
-  markets: ['forex'],
-  embedding: new Array(1536).fill(0.1),
-  metadata: {
-    filename: 'strategy.pdf',
-    fileSize: 1024000,
-    mimeType: 'application/pdf',
-    processingTime: 1500,
+const mockPrismaClient = {
+  document: {
+    findUnique: jest.fn(),
+    findFirst: jest.fn(),
+    upsert: jest.fn(),
+    findMany: jest.fn(),
+    count: jest.fn(),
+    groupBy: jest.fn(),
   },
 };
+jest.mock('@prisma/client', () => ({
+  PrismaClient: jest.fn(() => mockPrismaClient),
+}));
 
-const mockKnowledgeResult = {
-  documents: [mockProcessingResult],
-  summary: 'Found relevant trading strategy documents...',
-  relatedConcepts: ['forex', 'technical analysis', 'risk management'],
-  confidence: 0.85,
-};
+jest.mock('../../config', () => ({
+  __esModule: true,
+  default: {
+    geminiApiKey: 'test-gemini-key',
+  },
+}));
+jest.mock('../../utils/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+}));
+
+// Typed Mocks
+const mockedFs = fs as jest.Mocked<typeof fs>;
+const mockedPdfParse = pdfParse as jest.MockedFunction<typeof pdfParse>;
+const mockedMammoth = mammoth as jest.Mocked<typeof mammoth>;
+const mockedVectorDatabaseService = vectorDatabaseService as jest.Mocked<typeof vectorDatabaseService>;
+const mockedNeo4jGraphService = neo4jGraphService as jest.Mocked<typeof neo4jGraphService>;
+const MockedGoogleGenerativeAI = GoogleGenerativeAI as jest.MockedClass<typeof GoogleGenerativeAI>;
+const mockGenerateContent = jest.fn();
+const mockGetGenerativeModel = jest.fn(() => ({
+  generateContent: mockGenerateContent,
+}));
 
 describe('KnowledgeBaseService', () => {
-  let knowledgeBaseService: KnowledgeBaseService;
+  let knowledgeBaseServiceInstance: KnowledgeBaseService;
+  // This is just for type hinting, the actual mock is above.
   let mockPrisma: jest.Mocked<PrismaClient>;
-  let mockGenAI: jest.Mocked<GoogleGenerativeAI>;
+
 
   beforeEach(() => {
-    // Setup mocks
-    mockPrisma = {
-      document: {
-        findMany: jest.fn(),
-        create: jest.fn(),
-        update: jest.fn(),
-        findUnique: jest.fn(),
-        findFirst: jest.fn(),
-        delete: jest.fn(),
-        count: jest.fn(),
-      },
-      $disconnect: jest.fn(),
-    } as any;
+    jest.clearAllMocks();
+    (MockedGoogleGenerativeAI as jest.Mock).mockImplementation(() => ({
+      getGenerativeModel: mockGetGenerativeModel,
+    }) as any);
 
-    mockGenAI = {
-      getGenerativeModel: jest.fn().mockReturnValue({
-        generateContent: jest.fn(),
-      }),
-    } as any;
-
-    // Mock GoogleGenerativeAI constructor
-    (GoogleGenerativeAI as jest.MockedClass<typeof GoogleGenerativeAI>).mockImplementation(() => mockGenAI);
-
-    // Mock file system operations
-    (fs.readdir as jest.Mock).mockResolvedValue([]);
-    (fs.readFile as jest.Mock).mockResolvedValue(Buffer.from('test content'));
-    (fs.stat as jest.Mock).mockResolvedValue({ size: 1024000 });
-
-    // Mock PDF parsing
-    (pdfParse as jest.Mock).mockResolvedValue({
-      text: 'This is extracted PDF content',
-      numpages: 10,
-      info: {},
-    });
-
-    // Mock Word document parsing
-    (mammoth.extractRawText as jest.Mock).mockResolvedValue({
-      value: 'This is extracted Word content',
-      messages: [],
-    });
-
-    // Mock vector database service
-    (vectorDatabaseService.addDocument as jest.Mock).mockResolvedValue({ id: 'vector-123' });
-    (vectorDatabaseService.searchSimilarDocuments as jest.Mock).mockResolvedValue([
-      { id: 'doc-123', score: 0.9, metadata: {} }
-    ]);
-
-    // Mock Neo4j service
-    (neo4jGraphService.addEntity as jest.Mock).mockResolvedValue(true);
-    (neo4jGraphService.createRelationship as jest.Mock).mockResolvedValue(true);
-
-    knowledgeBaseService = new KnowledgeBaseService();
-    (knowledgeBaseService as any).prisma = mockPrisma;
+    knowledgeBaseServiceInstance = new KnowledgeBaseService();
+    // Assign the auto-mocked prisma client instance for type-safety if needed in tests directly
+    // However, typically you'd use mockPrismaClient.document.* for assertions.
+    mockPrisma = new PrismaClient() as any;
   });
 
-  afterEach(() => {
-    jest.clearAllMocks();
+  describe('Constructor', () => {
+    it('should initialize GoogleGenerativeAI if geminiApiKey is present in config', () => {
+      // Config is mocked to have geminiApiKey
+      const service = new KnowledgeBaseService(); // Instantiation triggers constructor
+      expect(MockedGoogleGenerativeAI).toHaveBeenCalledWith('test-gemini-key');
+      expect((service as any).genAI).toBeDefined();
+    });
+
+    it('should not initialize GoogleGenerativeAI if geminiApiKey is missing', () => {
+      const originalApiKey = config.geminiApiKey;
+      (config as any).geminiApiKey = undefined;
+      const service = new KnowledgeBaseService();
+      expect((service as any).genAI).toBeUndefined();
+      (config as any).geminiApiKey = originalApiKey; // Restore
+    });
+
+    it('should set knowledgeBasePath correctly', () => {
+      expect((knowledgeBaseServiceInstance as any).knowledgeBasePath).toEqual(path.join(process.cwd(), '../knowledge-base'));
+    });
+  });
+
+  describe('chunkText', () => {
+    it('should return empty array for empty text', () => {
+      expect(knowledgeBaseServiceInstance.chunkText('')).toEqual([]);
+    });
+    it('should return single chunk if text is shorter than chunk size', () => {
+      const text = "Short text.";
+      expect(knowledgeBaseServiceInstance.chunkText(text, 100, 10)).toEqual([text]);
+    });
+    it('should create multiple chunks for longer text with overlap', () => {
+      const text = "This is a longer text that needs to be chunked properly for testing purposes. We need to ensure overlap works as expected.";
+      const chunks = knowledgeBaseServiceInstance.chunkText(text, 30, 10);
+      expect(chunks.length).toBeGreaterThan(1);
+      expect(chunks[0]).toBe("This is a longer text that ne");
+      expect(chunks[1]).toBe(" text that needs to be chunked");
+    });
+  });
+
+  describe('processDocument', () => {
+    const mockDoc = { filename: 'test.pdf', filePath: '/fake/path/test.pdf' };
+    const mockFileStats = { size: 1024 };
+    const mockPdfText = 'This is PDF content. It is long enough for processing.';
+    const mockAiAnalysis = {
+      title: 'Test PDF Title', summary: 'Summary of PDF.', category: 'research',
+      tags: ['pdf', 'test'], markets: ['general'],
+    };
+    const versionedDocIdV1 = 'doc_test_pdf_v1';
+
+    beforeEach(() => {
+      mockedFs.stat.mockResolvedValue(mockFileStats as any);
+      mockedPdfParse.mockResolvedValue({ text: mockPdfText } as any);
+      mockGenerateContent.mockResolvedValue({ response: { text: () => JSON.stringify(mockAiAnalysis) } });
+      mockedVectorDatabaseService.storeDocumentChunks.mockResolvedValue(undefined);
+      mockedNeo4jGraphService.processDocumentForGraph.mockResolvedValue(undefined);
+      (mockPrismaClient.document.findFirst as jest.Mock).mockResolvedValue(null); // Default to new document
+      (mockPrismaClient.document.upsert as jest.Mock).mockResolvedValue({ id: versionedDocIdV1 } as any);
+    });
+
+    it('successfully processes a new PDF document', async () => {
+      const result = await (knowledgeBaseServiceInstance as any).processDocument(mockDoc);
+      expect(mockedPdfParse).toHaveBeenCalled();
+      expect(mockGenerateContent).toHaveBeenCalled(); // AI analysis
+      expect(mockedVectorDatabaseService.storeDocumentChunks).toHaveBeenCalledWith(
+        versionedDocIdV1, expect.any(Array),
+        expect.objectContaining({ title: mockAiAnalysis.title, version: 1, originalDocumentId: versionedDocIdV1 })
+      );
+      expect(mockPrismaClient.document.upsert).toHaveBeenCalledWith(expect.objectContaining({
+        where: { id: versionedDocIdV1 }, create: expect.objectContaining({ version: 1 })
+      }));
+      expect(result?.id).toBe(versionedDocIdV1);
+    });
+
+    it('correctly increments version for an existing document', async () => {
+      (mockPrismaClient.document.findFirst as jest.Mock).mockResolvedValue({ filename: mockDoc.filename, version: 1, id:'doc_test_pdf_v1' });
+      const versionedDocIdV2 = 'doc_test_pdf_v2';
+      (mockPrismaClient.document.upsert as jest.Mock).mockResolvedValue({ id: versionedDocIdV2 } as any);
+
+      const result = await (knowledgeBaseServiceInstance as any).processDocument(mockDoc);
+      expect(mockedVectorDatabaseService.storeDocumentChunks).toHaveBeenCalledWith(
+        versionedDocIdV2, expect.any(Array), expect.objectContaining({ version: 2, originalDocumentId: versionedDocIdV2 })
+      );
+      expect(mockPrismaClient.document.upsert).toHaveBeenCalledWith(expect.objectContaining({
+         where: { id: versionedDocIdV2 }, create: expect.objectContaining({ version: 2 })
+      }));
+      expect(result?.id).toBe(versionedDocIdV2);
+    });
+
+    // Add tests for DOCX, TXT, content extraction failure, AI analysis failure, insufficient content...
   });
 
   describe('processAllDocuments', () => {
-    it('should process all documents in the knowledge base', async () => {
-      // Setup mocks
-      const mockDocuments = [
-        { filename: 'doc1.pdf', filePath: '/path/doc1.pdf' },
-        { filename: 'doc2.pdf', filePath: '/path/doc2.pdf' },
-      ];
+    it('should process all documents found by scanKnowledgeBase', async () => {
+        const mockScanResults = [
+            { filename: 'file1.pdf', filePath: 'path/to/file1.pdf' },
+            { filename: 'file2.txt', filePath: 'path/to/file2.txt' },
+        ];
+        (mockedFs.readdir as jest.Mock).mockImplementation((dirPath) => {
+            if (dirPath === (knowledgeBaseServiceInstance as any).knowledgeBasePath) {
+                return Promise.resolve(mockScanResults.map(f => ({ name: f.filename, isFile: () => true, isDirectory: () => false })));
+            }
+            return Promise.resolve([]);
+        });
 
-      jest.spyOn(knowledgeBaseService as any, 'scanKnowledgeBase').mockResolvedValue(mockDocuments);
-      jest.spyOn(knowledgeBaseService as any, 'processDocument').mockResolvedValue(mockProcessingResult);
-      jest.spyOn(knowledgeBaseService as any, 'storeDocument').mockResolvedValue(mockDocument);
+        const processDocumentSpy = jest.spyOn(knowledgeBaseServiceInstance as any, 'processDocument')
+            .mockResolvedValueOnce(createMockDocResult('id1', 'file1.pdf', 'content1'))
+            .mockResolvedValueOnce(createMockDocResult('id2', 'file2.txt', 'content2'));
 
-      // Execute
-      const result = await knowledgeBaseService.processAllDocuments();
+        const storeDocumentSpy = jest.spyOn(knowledgeBaseServiceInstance as any, 'storeDocument').mockResolvedValue(undefined);
 
-      // Verify
-      expect(result).toHaveLength(2);
-      expect(result[0]).toEqual(mockProcessingResult);
-      expect(logger.info).toHaveBeenCalledWith('Starting knowledge base processing...');
-      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Processed 2 documents'));
+        await knowledgeBaseServiceInstance.processAllDocuments();
+
+        expect(processDocumentSpy).toHaveBeenCalledTimes(mockScanResults.length);
+        expect(storeDocumentSpy).toHaveBeenCalledTimes(mockScanResults.length);
     });
+  });
 
-    it('should handle document processing errors gracefully', async () => {
-      // Setup mocks
-      const mockDocuments = [
-        { filename: 'good.pdf', filePath: '/path/good.pdf' },
-        { filename: 'bad.pdf', filePath: '/path/bad.pdf' },
-      ];
 
-      jest.spyOn(knowledgeBaseService as any, 'scanKnowledgeBase').mockResolvedValue(mockDocuments);
-      jest.spyOn(knowledgeBaseService as any, 'processDocument')
-        .mockResolvedValueOnce(mockProcessingResult)
-        .mockRejectedValueOnce(new Error('Processing failed'));
-      jest.spyOn(knowledgeBaseService as any, 'storeDocument').mockResolvedValue(mockDocument);
+  describe('queryKnowledgeBase', () => {
+    const query: KnowledgeQuery = { query: 'test query', category: 'research', limit: 5 };
+    const mockQdrantChunks = [
+      { id: 'doc1_v1_chunk_0', score: 0.9, payload: { chunkText: 'text1', originalDocumentId: 'doc1_v1', title: 'Doc 1', category: 'research' } },
+    ];
+    const mockPrismaDocs = [{ id: 'doc1_v1', title: 'Doc 1', content: 'full content', summary:'s1', filename:'f1.pdf', fileSize:1, mimeType:'app/pdf', tags:[], markets:[], category:'research', version: 1, isProcessed: true, originalName: 'f1.pdf', filePath: 'path/f1.pdf', createdAt: new Date(), updatedAt: new Date(), processingError: null, uploadedBy: null, isPublic: false, embedding: null }];
 
-      // Execute
-      const result = await knowledgeBaseService.processAllDocuments();
 
-      // Verify
-      expect(result).toHaveLength(1);
-      expect(logger.error).toHaveBeenCalledWith(
-        'Error processing document bad.pdf:',
-        expect.any(Error)
+    it('should query vector DB, fetch parent docs, and generate summary', async () => {
+      mockedVectorDatabaseService.searchSimilarDocuments.mockResolvedValue(mockQdrantChunks as any);
+      (mockPrismaClient.document.findMany as jest.Mock).mockResolvedValue(mockPrismaDocs);
+      mockGenerateContent.mockResolvedValue({ response: { text: () => 'AI summary for query' } });
+
+      const result = await knowledgeBaseServiceInstance.queryKnowledgeBase(query);
+      expect(mockedVectorDatabaseService.searchSimilarDocuments).toHaveBeenCalledWith(
+        query.query, expect.objectContaining({ filter: { must: [{ key: 'category', match: { value: 'research' }}] }})
       );
+      expect(mockPrismaClient.document.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: ['doc1_v1'] } } }));
+      expect(mockGenerateContent).toHaveBeenCalled(); // For summary
+      expect(result.matchedChunks.length).toBe(1);
+      expect(result.documents.length).toBe(1);
+      expect(result.summary).toBe('AI summary for query');
     });
   });
 
-  describe('scanKnowledgeBase', () => {
-    it('should scan and return supported document files', async () => {
-      // Setup mock directory structure
-      const mockEntries = [
-        { name: 'doc1.pdf', isDirectory: () => false, isFile: () => true },
-        { name: 'doc2.docx', isDirectory: () => false, isFile: () => true },
-        { name: 'image.jpg', isDirectory: () => false, isFile: () => true }, // unsupported
-        { name: 'subfolder', isDirectory: () => true, isFile: () => false },
-      ];
+  describe('answerQueryWithKnowledge', () => {
+    const userQuery = 'What is fintech?';
+    const mockContextChunks: MatchedChunk[] = [
+      { chunkId: 'doc_fin_v1_chunk_0', text: 'Fintech is financial technology.', score: 0.88, originalDocumentId: 'doc_fin_v1', documentTitle: 'Fintech Explained' }
+    ];
 
-      const mockSubEntries = [
-        { name: 'subdoc.pdf', isDirectory: () => false, isFile: () => true },
-      ];
-
-      (fs.readdir as jest.Mock)
-        .mockResolvedValueOnce(mockEntries)
-        .mockResolvedValueOnce(mockSubEntries);
-
-      // Execute
-      const result = await (knowledgeBaseService as any).scanKnowledgeBase();
-
-      // Verify
-      expect(result).toHaveLength(3); // Only supported files
-      expect(result).toContainEqual({
-        filename: 'doc1.pdf',
-        filePath: expect.stringContaining('doc1.pdf'),
+    it('should generate an answer using context from knowledge base', async () => {
+      // Mock queryKnowledgeBase to return some chunks
+      jest.spyOn(knowledgeBaseServiceInstance, 'queryKnowledgeBase').mockResolvedValue({
+        query: userQuery, matchedChunks: mockContextChunks, documents: [], confidence: 0.88
       });
-      expect(result).toContainEqual({
-        filename: 'doc2.docx',
-        filePath: expect.stringContaining('doc2.docx'),
-      });
-      expect(result).toContainEqual({
-        filename: 'subdoc.pdf',
-        filePath: expect.stringContaining('subdoc.pdf'),
-      });
-    });
+      mockGenerateContent.mockResolvedValue({ response: { text: () => 'Fintech is the new tech for finance.' } });
 
-    it('should handle directory scanning errors', async () => {
-      // Setup mock error
-      (fs.readdir as jest.Mock).mockRejectedValue(new Error('Permission denied'));
-
-      // Execute
-      const result = await (knowledgeBaseService as any).scanKnowledgeBase();
-
-      // Verify
-      expect(result).toEqual([]);
-      expect(logger.error).toHaveBeenCalledWith(
-        'Error scanning knowledge base:',
-        expect.any(Error)
-      );
+      const result = await knowledgeBaseServiceInstance.answerQueryWithKnowledge(userQuery);
+      expect(knowledgeBaseServiceInstance.queryKnowledgeBase).toHaveBeenCalledWith(expect.objectContaining({ query: userQuery }));
+      expect(mockGenerateContent).toHaveBeenCalledWith(expect.stringContaining('Fintech is financial technology.'));
+      expect(result).toEqual({ answer: 'Fintech is the new tech for finance.', sources: mockContextChunks, query: userQuery });
     });
   });
 
-  describe('isSupportedFormat', () => {
-    it('should return true for supported file formats', () => {
-      const supportedFiles = [
-        'document.pdf',
-        'report.doc',
-        'analysis.docx',
-        'notes.txt',
-        'readme.md',
-      ];
+  describe('rewriteArticleWithKnowledge', () => {
+    const articleId = 'doc_rewrite_v1';
+    const originalContent = 'This is an article about market trends. It is quite long.';
+    const instructions = 'Summarize this for a busy executive.';
+    const rewrittenText = 'Market trends summarized for executives.';
 
-      supportedFiles.forEach(filename => {
-        expect((knowledgeBaseService as any).isSupportedFormat(filename)).toBe(true);
-      });
-    });
+    it('should rewrite article by ID, using KB context', async () => {
+        (mockPrismaClient.document.findUnique as jest.Mock).mockResolvedValue({ id: articleId, content: originalContent, title: 'Market Trends' });
+        jest.spyOn(knowledgeBaseServiceInstance, 'queryKnowledgeBase').mockResolvedValue({
+            query: expect.any(String),
+            matchedChunks: [{ chunkId: 'ctx_chunk_0', text: 'Some related context.', score: 0.8, originalDocumentId: 'ctx_doc', documentTitle: 'Context Doc' }],
+            documents: []
+        });
+        mockGenerateContent.mockResolvedValue({ response: { text: () => rewrittenText }});
 
-    it('should return false for unsupported file formats', () => {
-      const unsupportedFiles = [
-        'image.jpg',
-        'video.mp4',
-        'archive.zip',
-        'executable.exe',
-        'stylesheet.css',
-      ];
-
-      unsupportedFiles.forEach(filename => {
-        expect((knowledgeBaseService as any).isSupportedFormat(filename)).toBe(false);
-      });
-    });
-
-    it('should be case insensitive', () => {
-      expect((knowledgeBaseService as any).isSupportedFormat('DOCUMENT.PDF')).toBe(true);
-      expect((knowledgeBaseService as any).isSupportedFormat('Report.DOC')).toBe(true);
-      expect((knowledgeBaseService as any).isSupportedFormat('image.JPG')).toBe(false);
+        const result = await knowledgeBaseServiceInstance.rewriteArticleWithKnowledge({ id: articleId }, instructions);
+        expect(mockPrismaClient.document.findUnique).toHaveBeenCalledWith({ where: { id: articleId }});
+        expect(knowledgeBaseServiceInstance.queryKnowledgeBase).toHaveBeenCalled();
+        expect(mockGenerateContent).toHaveBeenCalledWith(expect.stringContaining(originalContent) && expect.stringContaining(instructions) && expect.stringContaining('Some related context.'));
+        expect(result.rewrittenText).toBe(rewrittenText);
+        expect(result.sources?.length).toBe(1);
     });
   });
 
-  describe('extractContent', () => {
-    it('should extract content from PDF files', async () => {
-      const result = await (knowledgeBaseService as any).extractContent('/path/document.pdf');
+  describe('getStatistics', () => {
+    it('should aggregate and return statistics from Prisma', async () => {
+        (mockPrismaClient.document.count as jest.Mock).mockResolvedValueOnce(100).mockResolvedValueOnce(95); // Total, Processed
+        (mockPrismaClient.document.groupBy as jest.Mock).mockResolvedValue([ { category: 'research', _count: { category: 50 } }, { category: 'news', _count: { category: 45 } } ]);
+        (mockPrismaClient.document.findMany as jest.Mock).mockResolvedValue([ { markets: ['forex', 'stocks'] }, { markets: ['forex', 'crypto'] } ]);
+        const testDate = new Date();
+        (mockPrismaClient.document.findFirst as jest.Mock).mockResolvedValue({ updatedAt: testDate });
 
-      expect(pdfParse).toHaveBeenCalled();
-      expect(result).toBe('This is extracted PDF content');
-    });
-
-    it('should extract content from Word documents', async () => {
-      const result = await (knowledgeBaseService as any).extractContent('/path/document.docx');
-
-      expect(mammoth.extractRawText).toHaveBeenCalled();
-      expect(result).toBe('This is extracted Word content');
-    });
-
-    it('should extract content from text files', async () => {
-      const result = await (knowledgeBaseService as any).extractContent('/path/document.txt');
-
-      expect(fs.readFile).toHaveBeenCalledWith('/path/document.txt', 'utf-8');
-      expect(result).toBe('test content');
-    });
-
-    it('should handle extraction errors', async () => {
-      (pdfParse as jest.Mock).mockRejectedValue(new Error('PDF parsing failed'));
-
-      const result = await (knowledgeBaseService as any).extractContent('/path/document.pdf');
-
-      expect(result).toBe('');
-      expect(logger.error).toHaveBeenCalledWith(
-        'Error extracting content from /path/document.pdf:',
-        expect.any(Error)
-      );
+        const stats = await knowledgeBaseServiceInstance.getStatistics();
+        expect(stats.totalDocuments).toBe(100);
+        expect(stats.processedDocuments).toBe(95);
+        expect(stats.categories).toEqual({ research: 50, news: 45 });
+        expect(stats.markets).toEqual({ forex: 2, stocks: 1, crypto: 1 });
+        expect(stats.lastProcessed).toEqual(testDate);
     });
   });
 
-  describe('queryKnowledge', () => {
-    it('should perform hybrid search and return results', async () => {
-      // Setup mocks
-      mockPrisma.document.findMany.mockResolvedValue([mockDocument]);
-
-      const mockModel = {
-        generateContent: jest.fn().mockResolvedValue({
-          response: {
-            text: () => 'This is a summary of trading strategies...'
-          }
-        })
-      };
-
-      mockGenAI.getGenerativeModel.mockReturnValue(mockModel as any);
-
-      const query = {
-        query: 'forex trading strategies',
-        market: 'forex',
-        limit: 5,
-      };
-
-      // Execute
-      const result = await knowledgeBaseService.queryKnowledge(query);
-
-      // Verify
-      expect(vectorDatabaseService.searchSimilarDocuments).toHaveBeenCalledWith(
-        'forex trading strategies',
-        5,
-        0.7
-      );
-      expect(mockPrisma.document.findMany).toHaveBeenCalled();
-      expect(result.documents).toHaveLength(1);
-      expect(result.summary).toContain('trading strategies');
-      expect(result.confidence).toBeGreaterThan(0);
-    });
-
-    it('should handle queries without results', async () => {
-      // Setup mocks for no results
-      (vectorDatabaseService.searchSimilarDocuments as jest.Mock).mockResolvedValue([]);
-      mockPrisma.document.findMany.mockResolvedValue([]);
-
-      const query = {
-        query: 'nonexistent topic',
-        limit: 5,
-      };
-
-      // Execute
-      const result = await knowledgeBaseService.queryKnowledge(query);
-
-      // Verify
-      expect(result.documents).toHaveLength(0);
-      expect(result.confidence).toBe(0);
-    });
-  });
-
-  describe('categorizeDocument', () => {
-    it('should categorize forex-related documents', () => {
-      const content = 'EUR/USD trading strategy and forex market analysis';
-      const filename = 'forex_strategy.pdf';
-
-      const result = (knowledgeBaseService as any).categorizeDocument(content, filename);
-
-      expect(result.category).toBe('strategy');
-      expect(result.markets).toContain('forex');
-      expect(result.tags).toContain('forex');
-    });
-
-    it('should categorize research documents', () => {
-      const content = 'Market research and economic analysis of global trends';
-      const filename = 'market_research.pdf';
-
-      const result = (knowledgeBaseService as any).categorizeDocument(content, filename);
-
-      expect(result.category).toBe('research');
-      expect(result.tags).toContain('research');
-    });
-
-    it('should extract multiple markets from content', () => {
-      const content = 'Analysis of forex, crypto, and futures markets with trading strategies';
-      const filename = 'multi_market_analysis.pdf';
-
-      const result = (knowledgeBaseService as any).categorizeDocument(content, filename);
-
-      expect(result.markets).toContain('forex');
-      expect(result.markets).toContain('crypto');
-      expect(result.markets).toContain('futures');
-    });
-  });
-
-  describe('generateSummary', () => {
-    it('should generate AI-powered summary', async () => {
-      const mockModel = {
-        generateContent: jest.fn().mockResolvedValue({
-          response: {
-            text: () => 'This document discusses forex trading strategies...'
-          }
-        })
-      };
-
-      mockGenAI.getGenerativeModel.mockReturnValue(mockModel as any);
-
-      const content = 'Long document content about forex trading...';
-
-      const result = await (knowledgeBaseService as any).generateSummary(content);
-
-      expect(mockModel.generateContent).toHaveBeenCalled();
-      expect(result).toContain('forex trading strategies');
-    });
-
-    it('should handle AI generation errors', async () => {
-      const mockModel = {
-        generateContent: jest.fn().mockRejectedValue(new Error('AI service unavailable'))
-      };
-
-      mockGenAI.getGenerativeModel.mockReturnValue(mockModel as any);
-
-      const content = 'Document content...';
-
-      const result = await (knowledgeBaseService as any).generateSummary(content);
-
-      expect(result).toBe('Summary could not be generated.');
-      expect(logger.error).toHaveBeenCalledWith(
-        'Error generating summary:',
-        expect.any(Error)
-      );
-    });
-  });
-
-  describe('storeDocument', () => {
-    it('should store document in database and vector store', async () => {
-      mockPrisma.document.create.mockResolvedValue(mockDocument);
-
-      await (knowledgeBaseService as any).storeDocument(mockProcessingResult);
-
-      expect(mockPrisma.document.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
-          title: mockProcessingResult.title,
-          content: mockProcessingResult.content,
-          summary: mockProcessingResult.summary,
-          category: mockProcessingResult.category,
-          tags: mockProcessingResult.tags,
-          markets: mockProcessingResult.markets,
-          embedding: mockProcessingResult.embedding,
-        })
-      });
-
-      expect(vectorDatabaseService.addDocument).toHaveBeenCalled();
-      expect(neo4jGraphService.addEntity).toHaveBeenCalled();
-    });
-
-    it('should handle storage errors', async () => {
-      mockPrisma.document.create.mockRejectedValue(new Error('Database error'));
-
-      await expect(
-        (knowledgeBaseService as any).storeDocument(mockProcessingResult)
-      ).rejects.toThrow('Database error');
-
-      expect(logger.error).toHaveBeenCalledWith(
-        'Error storing document:',
-        expect.any(Error)
-      );
-    });
-  });
 });
+
+// Helper to create mock DocumentProcessingResult for tests
+function createMockDocResult(id: string, filename: string, content: string): DocumentProcessingResult {
+    return {
+        id,
+        title: `Title for ${filename}`,
+        content,
+        summary: `Summary for ${filename}`,
+        category: 'test-category',
+        tags: ['test'],
+        markets: ['test-market'],
+        metadata: {
+            filename,
+            fileSize: 1234,
+            mimeType: 'application/pdf', // example
+            processingTime: 100,
+        }
+    };
+}
