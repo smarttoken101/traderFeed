@@ -1,5 +1,13 @@
 {
   "dependencies": {
-    "@upstash/context7-mcp": "^1.0.13"
+    "@upstash/context7-mcp": "^1.0.13",
+    "papaparse": "^5.5.3"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/papaparse": "^5.3.16",
+    "axios": "^1.10.0",
+    "jest": "^30.0.0",
+    "jszip": "^3.10.1"
   }
 }

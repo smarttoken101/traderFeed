@@ -137,7 +137,7 @@ router.post('/analyze/:instrument', async (req: Request, res: Response) => {
 router.post('/update', async (req: Request, res: Response) => {
   try {
     // Start COT update in background
-    cotService.processMockCotData().catch((error: any) => {
+    cotService.updateWeeklyCotData().catch((error: any) => {
       logger.error('Background COT update failed:', error);
     });
 

@@ -1,5 +1,7 @@
 import axios from 'axios';
 import { PrismaClient } from '@prisma/client';
+import JSZip from 'jszip';
+import Papa from 'papaparse';
 import logger from '../utils/logger';
 
 const prisma = new PrismaClient();
@@ -100,21 +102,168 @@ export class COTService {
   /**
    * Download and parse COT data from CFTC
    */
-  async downloadCotData(year?: number): Promise<CotDataRecord[]> {
+  async downloadCotData(year?: number): Promise<ArrayBuffer> {
     try {
       const currentYear = year || new Date().getFullYear();
       const url = `${this.cftcBaseUrl}/fut_disagg_txt_${currentYear}.zip`;
       
       logger.info(`Downloading COT data for year ${currentYear} from ${url}`);
       
-      // For now, we'll create mock data since direct CFTC parsing requires
-      // complex ZIP file handling and CSV parsing
-      return this.generateMockCotData();
+      const response = await axios.get(url, { responseType: 'arraybuffer' });
+
+      logger.info(`Successfully downloaded COT data for year ${currentYear}`);
+      return response.data;
       
     } catch (error) {
-      logger.error('Error downloading COT data:', error);
-      throw error;
+      logger.error(`Error downloading COT data for year ${currentYear}:`, error);
+      // It's generally better to throw a new error with a clear message
+      // or handle specific axios errors if needed.
+      throw new Error(`Failed to download COT data from ${url}. Original error: ${error.message}`);
     }
+  }
+
+  /**
+   * Parses CSV data from a ZIP buffer.
+   * @param zipBuffer The ArrayBuffer containing the ZIP data.
+   * @returns A Promise resolving to the CSV data as a string.
+   */
+  private async parseCotCsvFromZip(zipBuffer: ArrayBuffer): Promise<string> {
+    try {
+      const zip = await JSZip.loadAsync(zipBuffer);
+      const targetFileName = 'fut_disagg_txt.csv'; // Typical name for CFTC disaggregated data
+      let csvFile = null;
+
+      logger.info('Files found in ZIP archive:');
+      for (const filename in zip.files) {
+        logger.info(`- ${filename}`);
+        // Using endsWith as some archives might have a parent folder e.g. "dea/"
+        if (filename.toLowerCase().endsWith(targetFileName)) {
+          csvFile = zip.files[filename];
+          break;
+        }
+      }
+
+      if (csvFile) {
+        logger.info(`Found COT CSV file: ${csvFile.name}`);
+        const csvData = await csvFile.async('string');
+        logger.info(`Successfully extracted CSV data (first 500 chars): ${csvData.substring(0, 500)}`);
+        return csvData;
+      } else {
+        logger.error(`Target CSV file '${targetFileName}' not found in the ZIP archive.`);
+        throw new Error('COT CSV file not found in the downloaded ZIP archive.');
+      }
+    } catch (error) {
+      logger.error('Error parsing COT CSV from ZIP:', error);
+      throw new Error(`Failed to parse COT CSV from ZIP. Original error: ${error.message}`);
+    }
+  }
+
+  /**
+   * Parses CSV data string and maps it to an array of CotDataRecord objects.
+   * @param csvData The raw CSV data as a string.
+   * @returns An array of CotDataRecord objects.
+   */
+  private parseCsvDataAndMapToRecords(csvData: string): CotDataRecord[] {
+    const records: CotDataRecord[] = [];
+    // Standardized column names based on typical CFTC Disaggregated Futures Only reports
+    // Check parsedResult.meta.fields for actual names if issues arise.
+    const dateCol = 'Report_Date_as_YYYY-MM-DD'; // Or 'As_of_Date_In_Form_YYMMDD'
+    const marketNameCol = 'Market_and_Exchange_Names';
+
+    // Disaggregated fields
+    const prodMercLongCol = 'Prod_Merc_Positions_Long_ALL';
+    const prodMercShortCol = 'Prod_Merc_Positions_Short_ALL';
+    const swapLongCol = 'Swap__Positions_Long_All'; // Note: CFTC sometimes has double underscore
+    const swapShortCol = 'Swap__Positions_Short_All';
+    const mMoneyLongCol = 'M_Money_Positions_Long_ALL';
+    const mMoneyShortCol = 'M_Money_Positions_Short_ALL';
+    const otherReptLongCol = 'Other_Rept_Positions_Long_ALL';
+    const otherReptShortCol = 'Other_Rept_Positions_Short_ALL';
+
+    // Legacy fields (if needed, map them similarly)
+    // const commLongCol = 'Comm_Positions_Long_ALL';
+    // const commShortCol = 'Comm_Positions_Short_ALL';
+    // const nonCommLongCol = 'NonComm_Positions_Long_ALL';
+    // const nonCommShortCol = 'NonComm_Positions_Short_ALL';
+    // const nonReptLongCol = 'NonRept_Positions_Long_ALL';
+    // const nonReptShortCol = 'NonRept_Positions_Short_ALL';
+
+
+    try {
+      const parsedResult = Papa.parse(csvData, {
+        header: true,
+        dynamicTyping: true,
+        skipEmptyLines: true,
+      });
+
+      if (parsedResult.errors && parsedResult.errors.length > 0) {
+        logger.warn('CSV parsing errors found:', parsedResult.errors);
+      }
+
+      logger.info(`CSV Headers: ${parsedResult.meta.fields?.join(', ')}`);
+      logger.info(`Parsed ${parsedResult.data.length} rows from CSV.`);
+
+      for (const row of parsedResult.data as any[]) {
+        const csvMarketName = row[marketNameCol] as string;
+        if (!csvMarketName) {
+          // logger.warn('Skipping row due to missing Market_and_Exchange_Names:', row);
+          continue;
+        }
+
+        let matchedInstrument: { code: string; name: string } | null = null;
+        for (const instrumentKey in this.instrumentMappings) {
+          const mapping = this.instrumentMappings[instrumentKey as keyof typeof this.instrumentMappings];
+          // Robust matching: case-insensitive and check if our mapping name is part of the long CSV name
+          if (csvMarketName.toUpperCase().includes(mapping.name.toUpperCase())) {
+            matchedInstrument = { code: instrumentKey, name: mapping.name };
+            break;
+          }
+        }
+
+        if (matchedInstrument) {
+          try {
+            const reportDateStr = row[dateCol] as string;
+            // CFTC date format is YYYY-MM-DD, which is directly parsable by new Date()
+            // If format was YYMMDD, it would need transformation:
+            // const year = parseInt(reportDateStr.substring(0, 2), 10) + 2000;
+            // const month = parseInt(reportDateStr.substring(2, 4), 10) - 1; // JS months are 0-indexed
+            // const day = parseInt(reportDateStr.substring(4, 6), 10);
+            // const reportDate = new Date(year, month, day);
+            const reportDate = new Date(reportDateStr);
+
+
+            const record: CotDataRecord = {
+              reportDate,
+              instrumentCode: matchedInstrument.code,
+              instrumentName: matchedInstrument.name,
+              producerLong: parseFloat(row[prodMercLongCol]) || 0,
+              producerShort: parseFloat(row[prodMercShortCol]) || 0,
+              swapLong: parseFloat(row[swapLongCol]) || 0,
+              swapShort: parseFloat(row[swapShortCol]) || 0,
+              managedMoneyLong: parseFloat(row[mMoneyLongCol]) || 0,
+              managedMoneyShort: parseFloat(row[mMoneyShortCol]) || 0,
+              otherReportableLong: parseFloat(row[otherReptLongCol]) || 0,
+              otherReportableShort: parseFloat(row[otherReptShortCol]) || 0,
+              // commercialLong, commercialShort, etc. can be calculated if needed
+              // or mapped if legacy fields are present and required.
+            };
+            records.push(record);
+          } catch (mapError) {
+            logger.warn(`Error mapping row for ${csvMarketName} (matched to ${matchedInstrument.name}):`, mapError, row);
+          }
+        } else {
+          // Only log if it's not a header/footer or clearly irrelevant row
+          if (csvMarketName && csvMarketName.length > 5) { // Basic filter for relevance
+             // logger.debug(`No instrument mapping found for CSV row: ${csvMarketName.substring(0,50)}...`);
+          }
+        }
+      }
+      logger.info(`Successfully mapped ${records.length} records from CSV data.`);
+    } catch (error) {
+      logger.error('Error parsing CSV data with PapaParse:', error);
+      throw new Error(`Failed to parse CSV data. Original error: ${error.message}`);
+    }
+    return records;
   }
 
   /**
@@ -495,10 +644,25 @@ export class COTService {
       logger.info('Starting weekly COT data update...');
       
       const currentYear = new Date().getFullYear();
-      const cotData = await this.downloadCotData(currentYear);
-      await this.processCotData(cotData);
+      // Step 1: Download the ZIP file
+      const zipBuffer = await this.downloadCotData(currentYear);
+
+      // Step 2: Extract CSV string from ZIP
+      const csvString = await this.parseCotCsvFromZip(zipBuffer);
+      logger.info('Successfully extracted CSV data from ZIP.');
+
+      // Step 3: Parse CSV string and map to records
+      const cotRecords = this.parseCsvDataAndMapToRecords(csvString);
+      logger.info(`Successfully parsed ${cotRecords.length} COT records from CSV string.`);
+
+      // Step 4: Process and store COT records
+      if (cotRecords.length > 0) {
+        await this.processCotData(cotRecords);
+        logger.info('Weekly COT data update completed and data processed.');
+      } else {
+        logger.info('Weekly COT data update: No records were mapped. Nothing to process.');
+      }
       
-      logger.info('Weekly COT data update completed');
     } catch (error) {
       logger.error('Error in weekly COT data update:', error);
       throw error;
