@@ -169,7 +169,8 @@ model Document {
   markets      String[] // ["forex", "crypto", "futures"]
   
   // Vector embedding for semantic search
-  embedding    Float[] // Vector representation of document
+  embedding    Float[]? // Vector representation of document - Made optional in previous step
+  version      Int      @default(1) // Document version
   
   // Processing status
   isProcessed  Boolean  @default(false)

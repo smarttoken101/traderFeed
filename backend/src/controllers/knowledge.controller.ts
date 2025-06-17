@@ -44,6 +44,108 @@ export class KnowledgeBaseController {
   }
 
   /**
+   * Rewrite an article using LLM and knowledge base context
+   */
+  async rewriteArticle(req: Request, res: Response): Promise<void> {
+    try {
+      const {
+        articleId,
+        articleText,
+        instructions
+      }: {
+        articleId?: string;
+        articleText?: string;
+        instructions: string
+      } = req.body;
+
+      if (!(articleId || articleText) || !instructions) {
+        res.status(400).json({
+          success: false,
+          error: 'Either articleId or articleText, and instructions must be provided in the request body.'
+        });
+        return;
+      }
+
+      const result = await knowledgeBaseService.rewriteArticleWithKnowledge(
+        { id: articleId, text: articleText },
+        instructions
+      );
+
+      if (result.error) {
+        const statusCode = result.error.includes("not found") ? 404 : 500;
+        res.status(statusCode).json({
+          success: false,
+          error: result.error,
+          originalArticleId: result.originalArticleId
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        data: result
+      });
+
+    } catch (error) {
+      logger.error('Error in rewriteArticle controller:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to rewrite article',
+        message: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
+   * Perform LLM query against the knowledge base
+   */
+  async llmQuery(req: Request, res: Response): Promise<void> {
+    try {
+      const {
+        query,
+        filters
+      }: {
+        query: string;
+        filters?: { market?: string; category?: string; tags?: string[] }
+      } = req.body;
+
+      if (!query) {
+        res.status(400).json({
+          success: false,
+          error: 'Query parameter is required in the request body'
+        });
+        return;
+      }
+
+      const result = await knowledgeBaseService.answerQueryWithKnowledge(query, filters);
+
+      if ('error' in result) {
+        // If the error is about not finding relevant info, it's more of a "not found" scenario
+        const statusCode = result.error.includes("Could not find relevant information") ? 404 : 500;
+        res.status(statusCode).json({
+          success: false,
+          error: result.error,
+          query: result.query
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        data: result
+      });
+
+    } catch (error) {
+      logger.error('Error in LLM query:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to process LLM query against knowledge base',
+        message: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  /**
    * Query knowledge base
    */
   async queryKnowledgeBase(req: Request, res: Response): Promise<void> {

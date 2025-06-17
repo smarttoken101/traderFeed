@@ -1,5 +1,5 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
-import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import logger from '../utils/logger';
 import config from '../config';
 
@@ -25,21 +25,88 @@ export interface DocumentEmbedding {
 
 class VectorDatabaseService {
   private qdrantClient: QdrantClient;
-  private openai: OpenAI;
+  private genAI?: GoogleGenerativeAI;
   private readonly collectionName = 'documents';
-  private readonly vectorSize = 1536; // OpenAI embedding dimension
+  private readonly vectorSize = 768; // Gemini "text-embedding-004" or similar dimension
 
   constructor() {
-    // Initialize Qdrant client (can be local or cloud)
+    // Initialize Qdrant client
     this.qdrantClient = new QdrantClient({
-      url: process.env.QDRANT_URL || 'http://localhost:6333',
-      apiKey: process.env.QDRANT_API_KEY, // Optional for cloud
+      url: config.qdrantUrl, // Use config for Qdrant URL
+      apiKey: config.qdrantApiKey,
     });
 
-    // Initialize OpenAI client
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY || 'your-openai-api-key',
-    });
+    // Initialize Google Gemini client
+    if (config.geminiApiKey) {
+      this.genAI = new GoogleGenerativeAI(config.geminiApiKey);
+    } else {
+      logger.warn('Gemini API key is not configured. Embedding generation will be mocked.');
+      this.useMockImplementation = true;
+    }
+  }
+
+  /**
+   * Stores document chunks and their embeddings in Qdrant.
+   * @param documentId The ID of the parent document.
+   * @param chunks Array of text chunks with their own optional IDs and metadata.
+   * @param documentMetadata Metadata of the parent document (title, category, etc.).
+   */
+  public async storeDocumentChunks(
+    documentId: string,
+    chunks: Array<{ text: string; id?: string }>, // id here is chunk's own unique part, if any
+    documentMetadata: {
+      title: string;
+      category: string;
+      markets: string[];
+      tags: string[];
+      filename: string;
+      originalDocumentId: string; // Reference to parent document in Prisma
+    }
+  ): Promise<void> {
+    if (this.useMockImplementation) {
+      logger.info(`Mock: Would store ${chunks.length} chunks for document ${documentId}`);
+      return;
+    }
+
+    try {
+      const points = [];
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        if (!chunk.text || chunk.text.trim() === "") {
+          logger.warn(`Skipping empty chunk for document ${documentId}, index ${i}`);
+          continue;
+        }
+
+        const embeddingVector = await this.generateEmbedding(chunk.text);
+        const chunkPointId = `${documentId}_chunk_${i}`; // Unique ID for the Qdrant point
+
+        points.push({
+          id: chunkPointId,
+          vector: embeddingVector,
+          payload: {
+            ...documentMetadata, // Spread parent document's metadata
+            chunkText: chunk.text, // Store the actual chunk text
+            chunkSequence: i,      // Store the sequence of the chunk
+            // documentId field here explicitly links to parent, same as originalDocumentId from metadata
+            documentId: documentMetadata.originalDocumentId
+          },
+        });
+      }
+
+      if (points.length > 0) {
+        await this.qdrantClient.upsert(this.collectionName, {
+          wait: true, // Wait for operation to complete
+          points: points,
+        });
+        logger.info(`Stored ${points.length} chunks with embeddings for document: ${documentId}`);
+      } else {
+        logger.info(`No valid chunks to store for document: ${documentId}`);
+      }
+    } catch (error) {
+      logger.error(`Failed to store document chunks for document ${documentId}:`, error);
+      // Decide if this should throw, or just log. For now, logging.
+      // throw error; // Uncomment if you want errors to propagate
+    }
   }
 
   /**
@@ -47,27 +114,36 @@ class VectorDatabaseService {
    */
   async initialize(): Promise<void> {
     try {
-      // Check if collection exists
       const collections = await this.qdrantClient.getCollections();
-      const existingCollection = collections.collections?.find(
+      let existingCollectionInfo = collections.collections?.find(
         col => col.name === this.collectionName
       );
 
-      if (!existingCollection) {
-        // Create collection
+      if (existingCollectionInfo) {
+        // Fetch detailed info to check vector size
+        const detailedInfo = await this.qdrantClient.getCollection(this.collectionName);
+        if (detailedInfo.config?.params?.vectors?.size !== this.vectorSize) {
+          logger.warn(`Qdrant collection '${this.collectionName}' exists with WRONG vector size (${detailedInfo.config?.params?.vectors?.size} instead of ${this.vectorSize}). Deleting and recreating. THIS WILL WIPE EXISTING DATA IN THE COLLECTION.`);
+          await this.qdrantClient.deleteCollection(this.collectionName);
+          existingCollectionInfo = undefined; // Reset to ensure creation
+        } else {
+          logger.info(`Qdrant collection '${this.collectionName}' already exists with correct vector size.`);
+        }
+      }
+
+      if (!existingCollectionInfo) {
         await this.qdrantClient.createCollection(this.collectionName, {
           vectors: {
-            size: this.vectorSize,
+            size: this.vectorSize, // Use the updated vectorSize
             distance: 'Cosine',
           },
         });
-        logger.info(`Created Qdrant collection: ${this.collectionName}`);
+        logger.info(`Created Qdrant collection: '${this.collectionName}' with vector size ${this.vectorSize}.`);
+        await this.createPayloadIndexes(); // Create indexes only for new collections
       } else {
-        logger.info(`Qdrant collection already exists: ${this.collectionName}`);
+        // If collection existed and was correct, ensure indexes are still attempted (idempotent)
+        await this.createPayloadIndexes();
       }
-
-      // Create payload index for faster filtering
-      await this.createPayloadIndexes();
     } catch (error) {
       logger.error('Failed to initialize vector database:', error);
       // Fall back to mock implementation if Qdrant is not available
@@ -108,19 +184,22 @@ class VectorDatabaseService {
    * Generate embeddings for text using OpenAI
    */
   async generateEmbedding(text: string): Promise<number[]> {
+    if (this.useMockImplementation || !this.genAI) {
+      logger.warn('Gemini client not available or in mock mode, using mock embedding.');
+      return this.generateMockEmbedding();
+    }
     try {
-      if (this.useMockImplementation) {
-        return this.generateMockEmbedding();
+      // Using "embedding-001" as specified, can be updated to "text-embedding-004" if that's preferred standard
+      const model = this.genAI.getGenerativeModel({ model: "embedding-001" });
+      // Gemini API might have different input limits, 8000 is a carry-over from OpenAI. Adjust if necessary.
+      const result = await model.embedContent(text.substring(0, 8000));
+      const embedding = result.embedding;
+      if (!embedding || !embedding.values) {
+        throw new Error('Invalid embedding response from Gemini');
       }
-
-      const response = await this.openai.embeddings.create({
-        model: 'text-embedding-ada-002',
-        input: text.substring(0, 8000), // Limit input length
-      });
-
-      return response.data[0].embedding;
+      return embedding.values;
     } catch (error) {
-      logger.warn('Failed to generate OpenAI embedding, using mock:', error);
+      logger.warn(`Failed to generate Gemini embedding for text snippet starting with: "${text.substring(0,50)}...", using mock:`, error);
       return this.generateMockEmbedding();
     }
   }

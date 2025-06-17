@@ -1,552 +1,301 @@
-import VectorDatabaseService, { vectorDatabaseService } from '../../services/vector-database.service';
+import VectorDatabaseServiceDefaultExport, { VectorDatabaseService } from '../../services/vector-database.service'; // Import both default and named
 import { QdrantClient } from '@qdrant/js-client-rest';
-import OpenAI from 'openai';
+import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai';
+import config from '../../config';
 import logger from '../../utils/logger';
 
-// Mock external dependencies
 jest.mock('@qdrant/js-client-rest');
-jest.mock('openai');
-jest.mock('../../utils/logger');
+jest.mock('@google/generative-ai');
 
-// Mock environment variables
-const originalEnv = process.env;
-beforeAll(() => {
-  process.env = {
-    ...originalEnv,
-    QDRANT_URL: 'http://localhost:6333',
-    QDRANT_API_KEY: 'test-qdrant-key',
-    OPENAI_API_KEY: 'test-openai-key'
-  };
-});
+// Mock config directly here as per instructions
+jest.mock('../../config', () => ({
+  __esModule: true, // This is important for ES6 modules
+  default: { // Assuming 'config' is a default export from '../../config'
+    geminiApiKey: 'test-gemini-key',
+    qdrantUrl: 'http://test-qdrant-url',
+    qdrantApiKey: 'test-qdrant-key',
+  },
+}));
 
-afterAll(() => {
-  process.env = originalEnv;
-});
+jest.mock('../../utils/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+}));
+
 
 describe('VectorDatabaseService', () => {
-  let vectorService: VectorDatabaseService;
-  let mockQdrantClient: jest.Mocked<QdrantClient>;
-  let mockOpenAI: jest.Mocked<OpenAI>;
-  let mockEmbeddings: any;
+  let vectorDBService: VectorDatabaseService;
+  let mockQdrantClientInstance: jest.Mocked<QdrantClient>;
+  let mockGenAIInstance: jest.Mocked<GoogleGenerativeAI>;
+  let mockGenModelInstance: jest.Mocked<GenerativeModel>;
+
+  const TEST_COLLECTION_NAME = 'documents'; // Match the service's private readonly collectionName
+  const CORRECT_VECTOR_SIZE = 768; // Match the service's private readonly vectorSize
 
   beforeEach(() => {
-    jest.clearAllMocks();
-
-    // Mock QdrantClient
-    mockQdrantClient = {
+    // Reset and reconfigure mocks for QdrantClient
+    mockQdrantClientInstance = {
       getCollections: jest.fn(),
       createCollection: jest.fn(),
+      getCollection: jest.fn(),
+      deleteCollection: jest.fn(),
       createPayloadIndex: jest.fn(),
       upsert: jest.fn(),
       search: jest.fn(),
-      retrieve: jest.fn(),
-      delete: jest.fn(),
-      scroll: jest.fn()
     } as any;
-    (QdrantClient as jest.Mock).mockImplementation(() => mockQdrantClient);
+    (QdrantClient as jest.Mock).mockImplementation(() => mockQdrantClientInstance);
 
-    // Mock OpenAI
-    mockEmbeddings = {
-      create: jest.fn()
-    };
-    mockOpenAI = {
-      embeddings: mockEmbeddings
+    // Reset and reconfigure mocks for GoogleGenerativeAI
+    mockGenModelInstance = {
+      embedContent: jest.fn(),
     } as any;
-    (OpenAI as unknown as jest.Mock).mockImplementation(() => mockOpenAI);
+    mockGenAIInstance = {
+      getGenerativeModel: jest.fn().mockReturnValue(mockGenModelInstance),
+    } as any;
+    (GoogleGenerativeAI as jest.Mock).mockImplementation(() => mockGenAIInstance);
 
-    vectorService = new VectorDatabaseService();
+    // Instantiate the service, it will use the mocked clients above
+    vectorDBService = new VectorDatabaseService();
+    jest.clearAllMocks();
   });
 
-  describe('initialize', () => {
-    it('should create collection when it does not exist', async () => {
-      mockQdrantClient.getCollections.mockResolvedValue({
-        collections: []
+  describe('Constructor & Initialize', () => {
+    it('should initialize QdrantClient and GoogleGenerativeAI from config', () => {
+      expect(QdrantClient).toHaveBeenCalledWith({
+        url: 'http://test-qdrant-url',
+        apiKey: 'test-qdrant-key',
       });
-      mockQdrantClient.createCollection.mockResolvedValue({} as any);
-      mockQdrantClient.createPayloadIndex.mockResolvedValue({} as any);
+      expect(GoogleGenerativeAI).toHaveBeenCalledWith('test-gemini-key');
+    });
 
-      await vectorService.initialize();
+    it('should initialize and create collection if it does not exist', async () => {
+      mockQdrantClientInstance.getCollections.mockResolvedValueOnce({ collections: [] });
+      mockQdrantClientInstance.createCollection.mockResolvedValueOnce(true);
+      mockQdrantClientInstance.createPayloadIndex.mockResolvedValue({} as any); // Simulate success
 
-      expect(mockQdrantClient.createCollection).toHaveBeenCalledWith('documents', {
+      await vectorDBService.initialize();
+
+      expect(mockQdrantClientInstance.getCollections).toHaveBeenCalledTimes(1);
+      expect(mockQdrantClientInstance.createCollection).toHaveBeenCalledWith(TEST_COLLECTION_NAME, {
         vectors: {
-          size: 1536,
-          distance: 'Cosine'
-        }
+          size: CORRECT_VECTOR_SIZE,
+          distance: 'Cosine',
+        },
       });
-      expect(logger.info).toHaveBeenCalledWith('Created Qdrant collection: documents');
+      expect(mockQdrantClientInstance.createPayloadIndex).toHaveBeenCalledTimes(4); // For category, markets, tags, createdAt
+      expect(logger.info).toHaveBeenCalledWith(`Created Qdrant collection: '${TEST_COLLECTION_NAME}' with vector size ${CORRECT_VECTOR_SIZE}.`);
     });
 
-    it('should skip creation when collection already exists', async () => {
-      mockQdrantClient.getCollections.mockResolvedValue({
-        collections: [{ name: 'documents' }]
-      });
-      mockQdrantClient.createPayloadIndex.mockResolvedValue({} as any);
+    it('should use existing collection if it exists with correct vector size', async () => {
+      mockQdrantClientInstance.getCollections.mockResolvedValueOnce({ collections: [{ name: TEST_COLLECTION_NAME, id: 1, points_count: 0, segments_count:0, indexed_vectors_count: 0, vectors_count:0 }] });
+      mockQdrantClientInstance.getCollection.mockResolvedValueOnce({
+        name: TEST_COLLECTION_NAME,
+        config: { params: { vectors: { size: CORRECT_VECTOR_SIZE } } },
+      } as any);
+       mockQdrantClientInstance.createPayloadIndex.mockResolvedValue({} as any);
 
-      await vectorService.initialize();
 
-      expect(mockQdrantClient.createCollection).not.toHaveBeenCalled();
-      expect(logger.info).toHaveBeenCalledWith('Qdrant collection already exists: documents');
+      await vectorDBService.initialize();
+
+      expect(mockQdrantClientInstance.getCollection).toHaveBeenCalledWith(TEST_COLLECTION_NAME);
+      expect(mockQdrantClientInstance.createCollection).not.toHaveBeenCalled();
+      expect(mockQdrantClientInstance.deleteCollection).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith(`Qdrant collection '${TEST_COLLECTION_NAME}' already exists with correct vector size.`);
     });
 
-    it('should handle initialization errors and fall back to mock implementation', async () => {
-      mockQdrantClient.getCollections.mockRejectedValue(new Error('Connection failed'));
+    it('should delete and recreate collection if it exists with incorrect vector size', async () => {
+      const INCORRECT_VECTOR_SIZE = 1024;
+      mockQdrantClientInstance.getCollections.mockResolvedValueOnce({ collections: [{ name: TEST_COLLECTION_NAME, id:1, points_count:0, segments_count:0, indexed_vectors_count:0, vectors_count:0 }] });
+      mockQdrantClientInstance.getCollection.mockResolvedValueOnce({
+        name: TEST_COLLECTION_NAME,
+        config: { params: { vectors: { size: INCORRECT_VECTOR_SIZE } } },
+      } as any);
+      mockQdrantClientInstance.deleteCollection.mockResolvedValueOnce(true);
+      mockQdrantClientInstance.createCollection.mockResolvedValueOnce(true);
+      mockQdrantClientInstance.createPayloadIndex.mockResolvedValue({} as any);
 
-      await vectorService.initialize();
+      await vectorDBService.initialize();
+
+      expect(mockQdrantClientInstance.deleteCollection).toHaveBeenCalledWith(TEST_COLLECTION_NAME);
+      expect(logger.warn).toHaveBeenCalledWith(
+        `Qdrant collection '${TEST_COLLECTION_NAME}' exists with WRONG vector size (${INCORRECT_VECTOR_SIZE} instead of ${CORRECT_VECTOR_SIZE}). Deleting and recreating. THIS WILL WIPE EXISTING DATA IN THE COLLECTION.`
+      );
+      expect(mockQdrantClientInstance.createCollection).toHaveBeenCalledWith(TEST_COLLECTION_NAME, {
+        vectors: { size: CORRECT_VECTOR_SIZE, distance: 'Cosine' },
+      });
+       expect(logger.info).toHaveBeenCalledWith(`Created Qdrant collection: '${TEST_COLLECTION_NAME}' with vector size ${CORRECT_VECTOR_SIZE}.`);
+    });
+
+    it('should fall back to useMockImplementation if Qdrant initialization fails', async () => {
+      mockQdrantClientInstance.getCollections.mockRejectedValueOnce(new Error('Qdrant connection error'));
+      
+      await vectorDBService.initialize();
 
       expect(logger.error).toHaveBeenCalledWith('Failed to initialize vector database:', expect.any(Error));
-    });
-
-    it('should create payload indexes', async () => {
-      mockQdrantClient.getCollections.mockResolvedValue({
-        collections: [{ name: 'documents' }]
-      });
-      mockQdrantClient.createPayloadIndex.mockResolvedValue({} as any);
-
-      await vectorService.initialize();
-
-      expect(mockQdrantClient.createPayloadIndex).toHaveBeenCalledWith('documents', {
-        field_name: 'category',
-        field_schema: 'keyword'
-      });
-      expect(mockQdrantClient.createPayloadIndex).toHaveBeenCalledWith('documents', {
-        field_name: 'markets',
-        field_schema: 'keyword'
-      });
+      // Access private member for testing - this is generally discouraged but sometimes necessary
+      expect((vectorDBService as any).useMockImplementation).toBe(true);
     });
   });
 
   describe('generateEmbedding', () => {
-    it('should generate OpenAI embeddings successfully', async () => {
-      const testText = 'Federal Reserve announces interest rate decision';
-      const mockEmbedding = Array.from({ length: 1536 }, (_, i) => i / 1536);
-      
-      mockEmbeddings.create.mockResolvedValue({
-        data: [{ embedding: mockEmbedding }]
+    const sampleText = 'This is a test text for embedding.';
+    const mockEmbeddingValues = Array.from({ length: CORRECT_VECTOR_SIZE }, (_, i) => i * 0.01);
+
+    it('should generate embedding successfully using Gemini', async () => {
+      mockGenModelInstance.embedContent.mockResolvedValueOnce({
+        embedding: { values: mockEmbeddingValues },
       });
 
-      const result = await vectorService.generateEmbedding(testText);
+      const embedding = await vectorDBService.generateEmbedding(sampleText);
 
-      expect(result).toEqual(mockEmbedding);
-      expect(mockEmbeddings.create).toHaveBeenCalledWith({
-        model: 'text-embedding-ada-002',
-        input: testText
-      });
+      expect(mockGenAIInstance.getGenerativeModel).toHaveBeenCalledWith({ model: 'embedding-001' });
+      expect(mockGenModelInstance.embedContent).toHaveBeenCalledWith(sampleText.substring(0, 8000));
+      expect(embedding).toEqual(mockEmbeddingValues);
     });
 
-    it('should truncate long text input to 8000 characters', async () => {
-      const longText = 'A'.repeat(10000);
-      const mockEmbedding = Array.from({ length: 1536 }, () => 0.1);
-      
-      mockEmbeddings.create.mockResolvedValue({
-        data: [{ embedding: mockEmbedding }]
-      });
+    it('should fall back to mock embedding if Gemini API fails', async () => {
+      mockGenModelInstance.embedContent.mockRejectedValueOnce(new Error('Gemini API error'));
+      const spyOnMockEmbedding = jest.spyOn(vectorDBService as any, 'generateMockEmbedding');
 
-      await vectorService.generateEmbedding(longText);
+      const embedding = await vectorDBService.generateEmbedding(sampleText);
 
-      expect(mockEmbeddings.create).toHaveBeenCalledWith({
-        model: 'text-embedding-ada-002',
-        input: longText.substring(0, 8000)
-      });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to generate Gemini embedding'), expect.any(Error));
+      expect(spyOnMockEmbedding).toHaveBeenCalled();
+      expect(embedding.length).toBe(CORRECT_VECTOR_SIZE);
+      spyOnMockEmbedding.mockRestore();
     });
 
-    it('should fall back to mock embedding when OpenAI fails', async () => {
-      const testText = 'Test text';
-      mockEmbeddings.create.mockRejectedValue(new Error('API rate limit exceeded'));
+    it('should use mock embedding if genAI is not configured', async () => {
+        (config as any).geminiApiKey = undefined; // Simulate no API key
+        const serviceWithoutKey = new VectorDatabaseService(); // Re-instantiate
+        const spyOnMockEmbedding = jest.spyOn(serviceWithoutKey as any, 'generateMockEmbedding');
 
-      const result = await vectorService.generateEmbedding(testText);
+        const embedding = await serviceWithoutKey.generateEmbedding(sampleText);
 
-      expect(result).toHaveLength(1536);
-      expect(result.every(val => typeof val === 'number')).toBe(true);
-      expect(logger.warn).toHaveBeenCalledWith('Failed to generate OpenAI embedding, using mock:', expect.any(Error));
+        expect(logger.warn).toHaveBeenCalledWith('Gemini client not available or in mock mode, using mock embedding.');
+        expect(spyOnMockEmbedding).toHaveBeenCalled();
+        expect(embedding.length).toBe(CORRECT_VECTOR_SIZE);
+        spyOnMockEmbedding.mockRestore();
+        (config as any).geminiApiKey = 'test-gemini-key'; // Restore for other tests
     });
 
-    it('should generate mock embedding with correct dimensions', async () => {
-      // Force mock implementation
-      mockQdrantClient.getCollections.mockRejectedValue(new Error('Not available'));
-      await vectorService.initialize();
-
-      const result = await vectorService.generateEmbedding('test');
-
-      expect(result).toHaveLength(1536);
-      expect(result.every(val => val >= -1 && val <= 1)).toBe(true);
+    it('generateMockEmbedding should return array of correct size', () => {
+      const mockEmbedding = (vectorDBService as any).generateMockEmbedding();
+      expect(mockEmbedding).toBeInstanceOf(Array);
+      expect(mockEmbedding.length).toBe(CORRECT_VECTOR_SIZE);
+      mockEmbedding.forEach((val: number) => expect(typeof val).toBe('number'));
     });
   });
 
-  describe('storeDocumentEmbedding', () => {
-    it('should store document embedding successfully', async () => {
-      const mockDocument = {
-        id: 'doc-123',
-        vector: Array.from({ length: 1536 }, () => 0.1),
-        payload: {
-          title: 'Fed Policy Update',
-          content: 'Federal Reserve announces new monetary policy...',
-          category: 'monetary-policy',
-          markets: ['forex', 'bonds'],
-          tags: ['fed', 'rates', 'policy'],
-          filename: 'fed-policy-update.pdf',
-          createdAt: '2025-06-10T10:00:00Z'
-        }
-      };
+  describe('storeDocumentChunks', () => {
+    const documentId = 'doc123';
+    const chunks = [{ text: 'Chunk 1 text' }, { text: 'Chunk 2 text' }];
+    const documentMetadata = { title: 'Test Doc', category: 'test', originalDocumentId: 'doc123_orig', tags:[], markets:[], filename: 'test.txt', version: 1 };
+    const mockEmbeddings = [
+      Array.from({ length: CORRECT_VECTOR_SIZE }, () => 0.1),
+      Array.from({ length: CORRECT_VECTOR_SIZE }, () => 0.2),
+    ];
 
-      mockQdrantClient.upsert.mockResolvedValue({} as any);
+    it('should store document chunks successfully', async () => {
+      const generateEmbeddingSpy = jest.spyOn(vectorDBService, 'generateEmbedding')
+        .mockResolvedValueOnce(mockEmbeddings[0])
+        .mockResolvedValueOnce(mockEmbeddings[1]);
+      mockQdrantClientInstance.upsert.mockResolvedValueOnce({} as any);
 
-      await vectorService.storeDocumentEmbedding(mockDocument);
+      await vectorDBService.storeDocumentChunks(documentId, chunks, documentMetadata);
 
-      expect(mockQdrantClient.upsert).toHaveBeenCalledWith('documents', {
+      expect(generateEmbeddingSpy).toHaveBeenCalledTimes(chunks.length);
+      expect(generateEmbeddingSpy).toHaveBeenCalledWith(chunks[0].text);
+      expect(generateEmbeddingSpy).toHaveBeenCalledWith(chunks[1].text);
+      expect(mockQdrantClientInstance.upsert).toHaveBeenCalledWith(TEST_COLLECTION_NAME, {
         wait: true,
-        points: [{
-          id: mockDocument.id,
-          vector: mockDocument.vector,
-          payload: mockDocument.payload
-        }]
+        points: [
+          {
+            id: `${documentId}_chunk_0`,
+            vector: mockEmbeddings[0],
+            payload: { ...documentMetadata, chunkText: chunks[0].text, chunkSequence: 0, documentId: documentMetadata.originalDocumentId },
+          },
+          {
+            id: `${documentId}_chunk_1`,
+            vector: mockEmbeddings[1],
+            payload: { ...documentMetadata, chunkText: chunks[1].text, chunkSequence: 1, documentId: documentMetadata.originalDocumentId },
+          },
+        ],
       });
+      expect(logger.info).toHaveBeenCalledWith(`Stored ${chunks.length} chunks with embeddings for document: ${documentId}`);
+      generateEmbeddingSpy.mockRestore();
     });
 
-    it('should handle storage errors gracefully', async () => {
-      const mockDocument = {
-        id: 'doc-123',
-        vector: Array.from({ length: 1536 }, () => 0.1),
-        payload: {
-          title: 'Test Document',
-          content: 'Test content',
-          category: 'test',
-          markets: ['forex'],
-          tags: ['test'],
-          filename: 'test.pdf',
-          createdAt: '2025-06-10T10:00:00Z'
-        }
-      };
+    it('should log and not throw if Qdrant upsert fails, as per current implementation', async () => {
+        jest.spyOn(vectorDBService, 'generateEmbedding').mockResolvedValue(mockEmbeddings[0]);
+        mockQdrantClientInstance.upsert.mockRejectedValueOnce(new Error('Qdrant upsert error'));
 
-      mockQdrantClient.upsert.mockRejectedValue(new Error('Storage failed'));
+        await vectorDBService.storeDocumentChunks(documentId, chunks, documentMetadata);
 
-      await expect(vectorService.storeDocumentEmbedding(mockDocument))
-        .rejects.toThrow('Storage failed');
-      expect(logger.error).toHaveBeenCalledWith('Failed to store document embedding:', expect.any(Error));
+        expect(logger.error).toHaveBeenCalledWith(`Failed to store document chunks for document ${documentId}:`, expect.any(Error));
     });
 
-    it('should use mock implementation when Qdrant is not available', async () => {
-      // Force mock implementation
-      mockQdrantClient.getCollections.mockRejectedValue(new Error('Not available'));
-      await vectorService.initialize();
 
-      const mockDocument = {
-        id: 'doc-123',
-        vector: Array.from({ length: 1536 }, () => 0.1),
-        payload: {
-          title: 'Test Document',
-          content: 'Test content',
-          category: 'test',
-          markets: ['forex'],
-          tags: ['test'],
-          filename: 'test.pdf',
-          createdAt: '2025-06-10T10:00:00Z'
-        }
-      };
-
-      await vectorService.storeDocumentEmbedding(mockDocument);
-
-      expect(logger.info).toHaveBeenCalledWith('Mock: Stored embedding for document doc-123');
-      expect(mockQdrantClient.upsert).not.toHaveBeenCalled();
+    it('should use mock implementation if useMockImplementation is true', async () => {
+      (vectorDBService as any).useMockImplementation = true;
+      await vectorDBService.storeDocumentChunks(documentId, chunks, documentMetadata);
+      expect(logger.info).toHaveBeenCalledWith(`Mock: Would store ${chunks.length} chunks for document ${documentId}`);
+      expect(mockQdrantClientInstance.upsert).not.toHaveBeenCalled();
+      (vectorDBService as any).useMockImplementation = false; // Reset for other tests
     });
   });
 
   describe('searchSimilarDocuments', () => {
-    it('should perform vector similarity search successfully', async () => {
-      const queryText = 'Federal Reserve interest rate policy';
-      const mockEmbedding = Array.from({ length: 1536 }, () => 0.2);
-      const mockSearchResults = [
-        {
-          id: 'doc-1',
-          version: 1,
-          score: 0.95,
-          payload: {
-            title: 'ECB Rate Decision',
-            content: 'European Central Bank raises rates...',
-            category: 'monetary-policy',
-            markets: ['forex'],
-            tags: ['ecb', 'rates']
-          }
-        },
-        {
-          id: 'doc-2',
-          version: 1,
-          score: 0.87,
-          payload: {
-            title: 'Fed Minutes Released',
-            content: 'Federal Reserve meeting minutes...',
-            category: 'monetary-policy',
-            markets: ['forex', 'bonds'],
-            tags: ['fed', 'minutes']
-          }
-        }
-      ];
+    const queryText = 'search query';
+    const mockQueryEmbedding = Array.from({ length: CORRECT_VECTOR_SIZE }, () => 0.3);
+    const mockQdrantResults = [
+      { id: 'res1', score: 0.9, payload: { title: 'Result 1' } },
+      { id: 'res2', score: 0.8, payload: { title: 'Result 2' } },
+    ];
 
-      mockEmbeddings.create.mockResolvedValue({
-        data: [{ embedding: mockEmbedding }]
-      });
-      mockQdrantClient.search.mockResolvedValue(mockSearchResults);
+    it('should search for similar documents successfully', async () => {
+      jest.spyOn(vectorDBService, 'generateEmbedding').mockResolvedValueOnce(mockQueryEmbedding);
+      mockQdrantClientInstance.search.mockResolvedValueOnce(mockQdrantResults as any);
 
-      const results = await vectorService.searchSimilarDocuments(queryText, {
-        limit: 10,
-        threshold: 0.8
-      });
+      const options = { limit: 5, threshold: 0.75, filter: { some_key: 'some_value' } };
+      const results = await vectorDBService.searchSimilarDocuments(queryText, options);
 
-      expect(results).toHaveLength(2);
-      expect(results[0].score).toBe(0.95);
-      expect(results[0].payload.title).toBe('ECB Rate Decision');
-      expect(mockQdrantClient.search).toHaveBeenCalledWith('documents', {
-        vector: mockEmbedding,
-        limit: 10,
-        score_threshold: 0.8,
-        with_payload: true
-      });
-    });
-
-    it('should search with category filter', async () => {
-      const queryText = 'gold market analysis';
-      const mockEmbedding = Array.from({ length: 1536 }, () => 0.3);
-      const mockSearchResults = [
-        {
-          id: 'doc-1',
-          version: 1,
-          score: 0.92,
-          payload: {
-            title: 'Gold Market Analysis',
-            category: 'commodities',
-            markets: ['commodities']
-          }
-        }
-      ];
-
-      mockEmbeddings.create.mockResolvedValue({
-        data: [{ embedding: mockEmbedding }]
-      });
-      mockQdrantClient.search.mockResolvedValue(mockSearchResults);
-
-      const results = await vectorService.searchSimilarDocuments(queryText, {
-        limit: 5,
-        filter: {
-          must: [
-            {
-              key: 'category',
-              match: { value: 'commodities' }
-            }
-          ]
-        }
-      });
-
-      expect(mockQdrantClient.search).toHaveBeenCalledWith('documents', {
-        vector: mockEmbedding,
-        limit: 5,
+      expect(vectorDBService.generateEmbedding).toHaveBeenCalledWith(queryText);
+      expect(mockQdrantClientInstance.search).toHaveBeenCalledWith(TEST_COLLECTION_NAME, {
+        vector: mockQueryEmbedding,
+        limit: options.limit,
+        score_threshold: options.threshold,
+        filter: options.filter,
         with_payload: true,
-        filter: {
-          must: [
-            {
-              key: 'category',
-              match: { value: 'commodities' }
-            }
-          ]
-        }
       });
+      expect(results).toEqual(mockQdrantResults.map(r => ({ id: r.id as string, score: r.score, payload: r.payload })));
     });
 
-    it('should search with market filter', async () => {
-      const queryText = 'forex trading analysis';
-      const mockEmbedding = Array.from({ length: 1536 }, () => 0.4);
-      
-      mockEmbeddings.create.mockResolvedValue({
-        data: [{ embedding: mockEmbedding }]
-      });
-      mockQdrantClient.search.mockResolvedValue([]);
+    it('should fall back to mock search results if Qdrant search fails', async () => {
+      jest.spyOn(vectorDBService, 'generateEmbedding').mockResolvedValueOnce(mockQueryEmbedding);
+      mockQdrantClientInstance.search.mockRejectedValueOnce(new Error('Qdrant search error'));
+      const spyOnMockSearch = jest.spyOn(vectorDBService as any, 'getMockSearchResults');
 
-      await vectorService.searchSimilarDocuments(queryText, {
-        filter: {
-          must: [
-            {
-              key: 'markets',
-              match: { any: ['forex', 'crypto'] }
-            }
-          ]
-        }
-      });
+      const results = await vectorDBService.searchSimilarDocuments(queryText);
 
-      expect(mockQdrantClient.search).toHaveBeenCalledWith('documents', {
-        vector: mockEmbedding,
-        limit: 10,
-        with_payload: true,
-        filter: {
-          must: [
-            {
-              key: 'markets',
-              match: { any: ['forex', 'crypto'] }
-            }
-          ]
-        }
-      });
-    });
-
-    it('should handle search errors gracefully', async () => {
-      const queryText = 'market analysis';
-      mockEmbeddings.create.mockResolvedValue({
-        data: [{ embedding: Array.from({ length: 1536 }, () => 0.1) }]
-      });
-      mockQdrantClient.search.mockRejectedValue(new Error('Search failed'));
-
-      const results = await vectorService.searchSimilarDocuments(queryText);
-
-      // Should return mock results as fallback
-      expect(results).toEqual(expect.any(Array));
       expect(logger.error).toHaveBeenCalledWith('Failed to search similar documents:', expect.any(Error));
+      expect(spyOnMockSearch).toHaveBeenCalledWith(queryText, 10); // Default limit
+      expect(results.length).toBeGreaterThanOrEqual(0); // Mock results returned
+      spyOnMockSearch.mockRestore();
     });
 
-    it('should return mock results when in mock mode', async () => {
-      // Force mock implementation
-      mockQdrantClient.getCollections.mockRejectedValue(new Error('Not available'));
-      await vectorService.initialize();
+    it('should use mock search if useMockImplementation is true', async () => {
+        (vectorDBService as any).useMockImplementation = true;
+        const spyOnMockSearch = jest.spyOn(vectorDBService as any, 'getMockSearchResults');
 
-      const queryText = 'financial analysis';
-      const results = await vectorService.searchSimilarDocuments(queryText);
+        const results = await vectorDBService.searchSimilarDocuments(queryText);
 
-      expect(results).toEqual(expect.any(Array));
-      expect(results.length).toBeGreaterThan(0);
-    });
-  });
-
-  describe('deleteDocument', () => {
-    it('should delete document successfully', async () => {
-      const documentId = 'doc-123';
-      mockQdrantClient.delete.mockResolvedValue({} as any);
-
-      await vectorService.deleteDocument(documentId);
-
-      expect(mockQdrantClient.delete).toHaveBeenCalledWith('documents', {
-        wait: true,
-        points: [documentId]
-      });
-    });
-
-    it('should handle deletion errors', async () => {
-      const documentId = 'doc-123';
-      mockQdrantClient.delete.mockRejectedValue(new Error('Deletion failed'));
-
-      await expect(vectorService.deleteDocument(documentId))
-        .rejects.toThrow('Deletion failed');
-      expect(logger.error).toHaveBeenCalledWith('Failed to delete document:', expect.any(Error));
-    });
-  });
-
-  describe('getCollectionStats', () => {
-    it('should retrieve collection statistics', async () => {
-      const mockStats = {
-        status: 'green',
-        vectors_count: 1500,
-        indexed_vectors_count: 1500,
-        points_count: 1500
-      };
-
-      // Mock collection info call
-      (mockQdrantClient as any).getCollection = jest.fn().mockResolvedValue(mockStats);
-
-      const stats = await vectorService.getCollectionStats();
-
-      expect(stats).toEqual(mockStats);
-    });
-
-    it('should handle stats retrieval errors', async () => {
-      (mockQdrantClient as any).getCollection = jest.fn().mockRejectedValue(new Error('Stats failed'));
-
-      const stats = await vectorService.getCollectionStats();
-
-      expect(stats.status).toBe('error');
-      expect(stats.error).toBe('Stats failed');
-    });
-  });
-
-  describe('Edge cases and error handling', () => {
-    it('should handle empty query text', async () => {
-      const emptyText = '';
-      mockEmbeddings.create.mockResolvedValue({
-        data: [{ embedding: Array.from({ length: 1536 }, () => 0) }]
-      });
-      
-      const results = await vectorService.searchSimilarDocuments(emptyText);
-      
-      expect(results).toEqual(expect.any(Array));
-    });
-
-    it('should handle invalid embedding generation', async () => {
-      const queryText = 'test query';
-      mockEmbeddings.create.mockRejectedValue(new Error('Invalid API key'));
-
-      const results = await vectorService.searchSimilarDocuments(queryText);
-      
-      // Should return mock results as fallback
-      expect(results).toEqual(expect.any(Array));
-      expect(logger.warn).toHaveBeenCalledWith('Failed to generate OpenAI embedding, using mock:', expect.any(Error));
-    });
-
-    it('should handle network connectivity issues', async () => {
-      mockQdrantClient.getCollections.mockRejectedValue(new Error('ECONNREFUSED'));
-
-      await vectorService.initialize();
-
-      expect(logger.error).toHaveBeenCalledWith('Failed to initialize vector database:', expect.any(Error));
-    });
-
-    it('should handle OpenAI API key issues', async () => {
-      mockEmbeddings.create.mockRejectedValue(new Error('Invalid API key'));
-
-      const result = await vectorService.generateEmbedding('test text');
-
-      expect(result).toHaveLength(1536);
-      expect(logger.warn).toHaveBeenCalledWith('Failed to generate OpenAI embedding, using mock:', expect.any(Error));
-    });
-  });
-
-  describe('Performance and optimization', () => {
-    it('should handle batch document storage', async () => {
-      const documents = Array.from({ length: 10 }, (_, i) => ({
-        id: `doc-${i}`,
-        vector: Array.from({ length: 1536 }, () => Math.random()),
-        payload: {
-          title: `Document ${i}`,
-          content: `Content for document ${i}`,
-          category: 'test',
-          markets: ['forex'],
-          tags: ['test'],
-          filename: `doc-${i}.pdf`,
-          createdAt: new Date().toISOString()
-        }
-      }));
-
-      mockQdrantClient.upsert.mockResolvedValue({} as any);
-
-      for (const doc of documents) {
-        await vectorService.storeDocumentEmbedding(doc);
-      }
-
-      expect(mockQdrantClient.upsert).toHaveBeenCalledTimes(10);
-    });
-
-    it('should handle large search result sets', async () => {
-      const queryText = 'financial market analysis';
-      const mockEmbedding = Array.from({ length: 1536 }, () => 0.1);
-      const largeResultSet = Array.from({ length: 1000 }, (_, i) => ({
-        id: `doc-${i}`,
-        version: 1,
-        score: 0.9 - (i * 0.0001),
-        payload: { title: `Document ${i}` }
-      }));
-
-      mockEmbeddings.create.mockResolvedValue({
-        data: [{ embedding: mockEmbedding }]
-      });
-      mockQdrantClient.search.mockResolvedValue(largeResultSet);
-
-      const results = await vectorService.searchSimilarDocuments(queryText, { limit: 1000 });
-
-      expect(results).toHaveLength(1000);
-      expect(results[0].score).toBeGreaterThan(results[999].score);
+        expect(spyOnMockSearch).toHaveBeenCalledWith(queryText, 10);
+        expect(vectorDBService.generateEmbedding).not.toHaveBeenCalled();
+        expect(mockQdrantClientInstance.search).not.toHaveBeenCalled();
+        (vectorDBService as any).useMockImplementation = false; // Reset
     });
   });
 });

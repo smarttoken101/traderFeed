@@ -1,7 +1,10 @@
 import Parser from 'rss-parser';
 import { PrismaClient } from '@prisma/client';
+import crypto from 'crypto';
 import feedConfigService from './feedConfig.service';
 import logger from '../utils/logger';
+import knowledgeBaseService from './knowledge-base.service';
+import { vectorDatabaseService } from './vector-database.service';
 
 const prisma = new PrismaClient();
 
@@ -54,7 +57,7 @@ export class RSSService {
       if (!feedData) {
         feedData = await prisma.rssFeed.create({
           data: {
-            name: `${category} feed`,
+            name: `${category} feed`, // Or derive name from feed title if available
             url: feedUrl,
             category,
             isActive: true
@@ -89,7 +92,7 @@ export class RSSService {
                 {
                   AND: [
                     { title: item.title },
-                    { feedId: feedData.id }
+                    { feedId: feedData.id } // Check title and feedId combination
                   ]
                 }
               ]
@@ -103,32 +106,73 @@ export class RSSService {
 
           // Process and store the article
           const publishedDate = item.pubDate ? new Date(item.pubDate) : new Date();
-          const content = item.content || item.contentSnippet || item.summary || '';
-          const description = item.contentSnippet || item.summary || content.substring(0, 500);
+          // Ensure content is a string, prefer item.content over contentSnippet/summary for full text
+          const articleFullText = item.content || item.contentSnippet || item.summary || '';
+          const description = item.contentSnippet || item.summary || articleFullText.substring(0, 500);
 
-          // Create article in database
+
           const articleData: ArticleCreateData = {
             title: item.title,
             description,
-            content,
+            content: articleFullText, // Store full text
             link: item.link,
             author: item.creator || item.author || null,
             publishedAt: publishedDate,
             feedId: feedData.id,
-            originalText: content,
-            markets: this.categorizeContent(item.title || '', content, category),
-            instruments: this.extractInstruments(item.title + ' ' + content)
+            originalText: articleFullText, // Store raw content if needed for other processing
+            markets: this.categorizeContent(item.title || '', articleFullText, category),
+            instruments: this.extractInstruments(item.title + ' ' + articleFullText)
           };
 
-          await prisma.article.create({
+          const createdArticle = await prisma.article.create({
             data: {
               ...articleData,
-              isProcessed: false
+              isProcessed: false // Initial state
             }
           });
 
           processedCount++;
-          logger.debug(`Stored article: ${item.title}`);
+          logger.debug(`Stored article: ${createdArticle.title} (ID: ${createdArticle.id})`);
+
+          // --- BEGIN KNOWLEDGE BASE INGESTION ---
+          if (createdArticle.content && createdArticle.content.trim().length > 0) {
+            const documentId = `rss_${createdArticle.id}`;
+
+            const textChunks = knowledgeBaseService.chunkText(createdArticle.content);
+
+            if (textChunks.length > 0) {
+              const documentMetadata = {
+                title: createdArticle.title,
+                sourceUrl: createdArticle.link,
+                feedName: feedData.name,
+                documentType: 'rss-feed-article',
+                originalArticleId: createdArticle.id,
+                category: feedData.category,
+                markets: createdArticle.markets,
+                tags: [], // Placeholder for tags, could be extracted from item.categories if available
+                publishedAt: createdArticle.publishedAt.toISOString(),
+                processedAt: new Date().toISOString(), // Timestamp for this processing version
+                version: 1, // Basic versioning for RSS content
+                filename: `rss_article_${createdArticle.id}.txt`, // Virtual filename for KB
+              };
+
+              try {
+                await vectorDatabaseService.storeDocumentChunks(
+                  documentId,
+                  textChunks.map((chunkText) => ({ text: chunkText })),
+                  documentMetadata
+                );
+                logger.info(`Successfully ingested content from RSS article ${createdArticle.title} (KB ID: ${documentId}) into knowledge base.`);
+              } catch (kbError) {
+                logger.error(`Failed to ingest RSS article ${createdArticle.title} (KB ID: ${documentId}) into knowledge base:`, kbError);
+              }
+            } else {
+              logger.warn(`No text chunks generated for RSS article ${createdArticle.title} (ID: ${createdArticle.id}). Skipping KB ingestion.`);
+            }
+          } else {
+            logger.warn(`RSS article ${createdArticle.title} (ID: ${createdArticle.id}) has no content. Skipping KB ingestion.`);
+          }
+          // --- END KNOWLEDGE BASE INGESTION ---
 
         } catch (error: any) {
           logger.error(`Error processing item from ${feedUrl}:`, error);
@@ -150,15 +194,14 @@ export class RSSService {
     } catch (error: any) {
       logger.error(`Error processing RSS feed ${feedUrl}:`, error);
       
-      // Update feed with error if it exists
       try {
-        const feedData = await prisma.rssFeed.findUnique({
+        const feedDataToUpdateError = await prisma.rssFeed.findUnique({
           where: { url: feedUrl }
         });
         
-        if (feedData) {
+        if (feedDataToUpdateError) {
           await prisma.rssFeed.update({
-            where: { id: feedData.id },
+            where: { id: feedDataToUpdateError.id },
             data: { 
               fetchError: error.message,
               lastFetched: new Date()
@@ -178,38 +221,26 @@ export class RSSService {
     const markets = new Set<string>();
     const text = (title + ' ' + content).toLowerCase();
 
-    // Add default category
     if (defaultCategory && defaultCategory !== 'general') {
       markets.add(defaultCategory);
     }
 
-    // Forex keywords
-    if (text.match(/\b(forex|fx|currency|exchange rate|eurusd|gbpusd|usdjpy|audusd|usdcad|usdchf|nzdusd|central bank|fed|ecb|boe|boj|interest rate|monetary policy|dollar|euro|pound|yen)\b/)) {
+    if (text.match(/\b(forex|fx|currency|exchange rate|eurusd|gbpusd|usdjpy|audusd|usdcad|usdchf|nzdusd|central bank|fed|ecb|boe|boj|interest rate|monetary policy|dollar|euro|pound|yen)\b/i)) {
       markets.add('forex');
     }
-
-    // Crypto keywords
-    if (text.match(/\b(crypto|bitcoin|btc|ethereum|eth|blockchain|altcoin|defi|nft|binance|coinbase|cryptocurrency|digital currency|web3|solana|cardano|polkadot)\b/)) {
+    if (text.match(/\b(crypto|bitcoin|btc|ethereum|eth|blockchain|altcoin|defi|nft|binance|coinbase|cryptocurrency|digital currency|web3|solana|cardano|polkadot)\b/i)) {
       markets.add('crypto');
     }
-
-    // Futures keywords
-    if (text.match(/\b(futures|commodities|oil|gold|silver|wheat|corn|natural gas|crude|wti|brent|copper|platinum|coffee|sugar|cotton|lumber)\b/)) {
+    if (text.match(/\b(futures|commodities|oil|gold|silver|wheat|corn|natural gas|crude|wti|brent|copper|platinum|coffee|sugar|cotton|lumber)\b/i)) {
       markets.add('futures');
     }
-
-    // Stocks keywords
-    if (text.match(/\b(stocks|equity|shares|nasdaq|s&p|dow|earnings|ipo|dividend|market cap|nyse|russell)\b/)) {
+    if (text.match(/\b(stocks|equity|shares|nasdaq|s&p|dow|earnings|ipo|dividend|market cap|nyse|russell)\b/i)) {
       markets.add('stocks');
     }
-
-    // Options keywords
-    if (text.match(/\b(options|calls|puts|volatility|vix|implied volatility|strike|expiration)\b/)) {
+    if (text.match(/\b(options|calls|puts|volatility|vix|implied volatility|strike|expiration)\b/i)) {
       markets.add('options');
     }
-
-    // Economic keywords
-    if (text.match(/\b(gdp|inflation|unemployment|cpi|ppi|non-farm|payrolls|retail sales|industrial production|consumer confidence)\b/)) {
+    if (text.match(/\b(gdp|inflation|unemployment|cpi|ppi|non-farm|payrolls|retail sales|industrial production|consumer confidence)\b/i)) {
       markets.add('economic');
     }
 
@@ -223,14 +254,12 @@ export class RSSService {
     const instruments = new Set<string>();
     const upperText = text.toUpperCase();
 
-    // Forex pairs
     const forexPairs = [
       'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'USDCAD', 'USDCHF', 'NZDUSD',
       'EURJPY', 'EURGBP', 'EURCHF', 'GBPJPY', 'GBPCHF', 'AUDJPY', 'EURAUD',
       'AUDCAD', 'AUDCHF', 'AUDNZD', 'CADJPY', 'CHFJPY', 'EURNZD', 'GBPAUD',
       'GBPCAD', 'GBPNZD', 'NZDCAD', 'NZDCHF', 'NZDJPY', 'USDPLN', 'USDSEK'
     ];
-    
     forexPairs.forEach(pair => {
       if (upperText.includes(pair) || 
           upperText.includes(pair.slice(0, 3) + '/' + pair.slice(3)) ||
@@ -239,7 +268,6 @@ export class RSSService {
       }
     });
 
-    // Crypto pairs
     const cryptoPairs = [
       'BTCUSD', 'ETHUSD', 'ADAUSD', 'DOTUSD', 'LINKUSD', 'LTCUSD', 
       'SOLUSD', 'AVAXUSD', 'MATICUSD', 'ATOMUSD', 'LUNAUSD', 'ALGOUSD'
@@ -252,7 +280,6 @@ export class RSSService {
       }
     });
 
-    // Commodities futures symbols
     const commodities = [
       'GC', 'SI', 'CL', 'NG', 'HG', 'ZW', 'ZC', 'ZS', 'ZL', 'ZM',
       'CT', 'KC', 'SB', 'CC', 'LBS', 'HE', 'LE', 'GF', 'PL', 'PA'
@@ -266,7 +293,6 @@ export class RSSService {
       }
     });
 
-    // Stock indices
     const indices = ['SPX', 'NDX', 'DJI', 'RUT', 'VIX', 'ES', 'NQ', 'YM'];
     indices.forEach(index => {
       if (upperText.includes(index)) {
@@ -282,98 +308,62 @@ export class RSSService {
    */
   async processAllFeeds(): Promise<void> {
     try {
-      // Load feeds from configuration if not already loaded
       if (feedConfigService.getAllFeeds().length === 0) {
         await feedConfigService.loadFeedsFromConfig();
       }
-
       const feeds = feedConfigService.getAllFeeds();
-      
       if (feeds.length === 0) {
         logger.warn('No RSS feeds configured');
         return;
       }
-
       logger.info(`Starting to process ${feeds.length} RSS feeds`);
-
-      // Process feeds with some concurrency but not too much to avoid rate limiting
       const batchSize = 3;
       for (let i = 0; i < feeds.length; i += batchSize) {
         const batch = feeds.slice(i, i + batchSize);
-        
         await Promise.allSettled(
           batch.map(feed => this.processFeed(feed.url, feed.category))
         );
-
-        // Small delay between batches
         if (i + batchSize < feeds.length) {
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
       }
-
       logger.info('Completed processing all RSS feeds');
-
     } catch (error) {
       logger.error('Error in processAllFeeds:', error);
       throw error;
     }
   }
 
-  /**
-   * Alias for processAllFeeds - for backward compatibility
-   */
   async processRSSFeeds(): Promise<void> {
     return this.processAllFeeds();
   }
 
-  /**
-   * Initialize default feeds from configuration
-   */
   async initializeDefaultFeeds(): Promise<void> {
     return this.initializeFeeds();
   }
 
-  /**
-   * Initialize feeds from configuration
-   */
   async initializeFeeds(): Promise<void> {
     try {
       await feedConfigService.loadFeedsFromConfig();
-      
       const feeds = feedConfigService.getAllFeeds();
       logger.info(`Initialized ${feeds.length} RSS feeds from configuration`);
-
-      // Create feed records in database
       for (const feed of feeds) {
         try {
           await prisma.rssFeed.upsert({
             where: { url: feed.url },
-            update: {
-              name: feed.name,
-              category: feed.category,
-              isActive: true
-            },
-            create: {
-              name: feed.name,
-              url: feed.url,
-              category: feed.category,
-              isActive: true
-            }
+            update: { name: feed.name, category: feed.category, isActive: true },
+            create: { name: feed.name, url: feed.url, category: feed.category, isActive: true }
           });
         } catch (error) {
           logger.error(`Error creating feed record for ${feed.url}:`, error);
         }
       }
-
     } catch (error) {
       logger.error('Error initializing feeds:', error);
       throw error;
     }
   }
 
-  /**
-   * Parse RSS feed - alias for backward compatibility
-   */
   async parseFeed(feedUrl: string): Promise<any[]> {
     try {
       const feed = await this.parser.parseURL(feedUrl);
@@ -384,23 +374,14 @@ export class RSSService {
     }
   }
 
-  /**
-   * Save articles to database - for backward compatibility
-   */
   async saveArticles(articles: any[], feedId: string): Promise<number> {
     let savedCount = 0;
-    
     for (const article of articles) {
       try {
-        // Check if article already exists
-        const existing = await prisma.article.findUnique({
-          where: { link: article.link }
-        });
-
+        const existing = await prisma.article.findUnique({ where: { link: article.link } });
         if (!existing) {
           const publishedDate = article.pubDate ? new Date(article.pubDate) : new Date();
           const content = article.content || article.contentSnippet || article.summary || '';
-          
           await prisma.article.create({
             data: {
               title: article.title,
@@ -416,20 +397,15 @@ export class RSSService {
               isProcessed: false
             }
           });
-          
           savedCount++;
         }
       } catch (error) {
         logger.error(`Error saving article ${article.title}:`, error);
       }
     }
-
     return savedCount;
   }
 
-  /**
-   * Get articles with optional filtering
-   */
   async getArticles(filters: {
     category?: string;
     sentiment?: string;
@@ -441,66 +417,33 @@ export class RSSService {
     dateTo?: Date;
   } = {}): Promise<any[]> {
     const where: any = {};
-
-    if (filters.category) {
-      where.feed = { category: filters.category };
-    }
-
-    if (filters.markets && filters.markets.length > 0) {
-      where.markets = { hasSome: filters.markets };
-    }
-
-    if (filters.sentiment) {
-      where.sentimentLabel = filters.sentiment;
-    }
-
-    if (filters.instruments && filters.instruments.length > 0) {
-      where.instruments = {
-        hasSome: filters.instruments
-      };
-    }
-
+    if (filters.category) where.feed = { category: filters.category };
+    if (filters.markets && filters.markets.length > 0) where.markets = { hasSome: filters.markets };
+    if (filters.sentiment) where.sentimentLabel = filters.sentiment;
+    if (filters.instruments && filters.instruments.length > 0) where.instruments = { hasSome: filters.instruments };
     if (filters.dateFrom || filters.dateTo) {
       where.publishedAt = {};
       if (filters.dateFrom) where.publishedAt.gte = filters.dateFrom;
       if (filters.dateTo) where.publishedAt.lte = filters.dateTo;
     }
-
     return await prisma.article.findMany({
       where,
       orderBy: { publishedAt: 'desc' },
       take: filters.limit || 50,
       skip: filters.offset || 0,
-      include: {
-        feed: {
-          select: {
-            name: true,
-            category: true,
-            url: true
-          }
-        }
-      }
+      include: { feed: { select: { name: true, category: true, url: true } } }
     });
   }
 
-  /**
-   * Get sentiment statistics for articles
-   */
   async getSentimentStats(timeframe: string = '24h'): Promise<any> {
-    const hours = timeframe === '24h' ? 24 : timeframe === '7d' ? 168 : 720; // 30d
+    const hours = timeframe === '24h' ? 24 : timeframe === '7d' ? 168 : 720;
     const since = new Date(Date.now() - hours * 60 * 60 * 1000);
-
     const stats = await prisma.article.groupBy({
       by: ['sentimentLabel'],
-      where: {
-        sentimentLabel: { not: null },
-        publishedAt: { gte: since },
-        isProcessed: true
-      },
+      where: { sentimentLabel: { not: null }, publishedAt: { gte: since }, isProcessed: true },
       _count: { sentimentLabel: true },
       _avg: { sentimentScore: true }
     });
-
     return stats.map(stat => ({
       sentiment: stat.sentimentLabel,
       count: stat._count.sentimentLabel,
@@ -508,18 +451,11 @@ export class RSSService {
     }));
   }
 
-  /**
-   * Get all RSS feeds from database
-   */
   async getAllFeeds(): Promise<any[]> {
     try {
       return await prisma.rssFeed.findMany({
         where: { isActive: true },
-        include: {
-          _count: {
-            select: { articles: true }
-          }
-        },
+        include: { _count: { select: { articles: true } } },
         orderBy: { name: 'asc' }
       });
     } catch (error) {
@@ -528,48 +464,27 @@ export class RSSService {
     }
   }
 
-  /**
-   * Add a new RSS feed to database
-   */
   async addFeed(name: string, url: string, category: string): Promise<any> {
     try {
-      return await prisma.rssFeed.create({
-        data: {
-          name,
-          url,
-          category,
-          isActive: true
-        }
-      });
+      return await prisma.rssFeed.create({ data: { name, url, category, isActive: true } });
     } catch (error) {
       logger.error('Error adding feed:', error);
       throw error;
     }
   }
 
-  /**
-   * Update feed status
-   */
   async updateFeedStatus(feedId: string, isActive: boolean): Promise<any> {
     try {
-      return await prisma.rssFeed.update({
-        where: { id: feedId },
-        data: { isActive }
-      });
+      return await prisma.rssFeed.update({ where: { id: feedId }, data: { isActive } });
     } catch (error) {
       logger.error('Error updating feed status:', error);
       throw error;
     }
   }
 
-  /**
-   * Delete RSS feed
-   */
   async deleteFeed(feedId: string): Promise<void> {
     try {
-      await prisma.rssFeed.delete({
-        where: { id: feedId }
-      });
+      await prisma.rssFeed.delete({ where: { id: feedId } });
     } catch (error) {
       logger.error('Error deleting feed:', error);
       throw error;
